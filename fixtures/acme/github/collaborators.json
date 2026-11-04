@@ -1,0 +1,14 @@
+[
+ {
+  "id": 500,
+  "login": "alice-gh",
+  "type": "User",
+  "role_name": "admin"
+ },
+ {
+  "id": 501,
+  "login": "bob-gh",
+  "type": "User",
+  "role_name": "write"
+ }
+]

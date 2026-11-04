@@ -1,0 +1,34 @@
+[
+ {
+  "id": "C01ENG",
+  "name": "eng",
+  "created": 1767603600,
+  "creator": "U01ALICE",
+  "is_archived": false,
+  "is_general": false,
+  "members": [
+   "U01ALICE",
+   "U02BOB",
+   "U03CAROL",
+   "U05EVE"
+  ],
+  "topic": {
+   "value": "Payments engineering",
+   "creator": "U01ALICE",
+   "last_set": 0
+  },
+  "purpose": {
+   "value": "Day-to-day engineering",
+   "creator": "U01ALICE",
+   "last_set": 0
+  },
+  "pins": [
+   {
+    "id": "1790848800.000100",
+    "type": "C",
+    "created": 1790850600,
+    "user": "U01ALICE"
+   }
+  ]
+ }
+]

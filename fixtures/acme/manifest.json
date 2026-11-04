@@ -1,0 +1,12 @@
+{
+ "tenant": "acme",
+ "project": null,
+ "repo": "acme/payments",
+ "slack_workspace": "Acme",
+ "fetched_at": "2026-10-05T00:00:00Z",
+ "window": {
+  "since": "2026-10-01",
+  "until": "2026-10-04"
+ },
+ "note": "Synthetic test data in the real Linear GraphQL and Slack export shapes. Not real people."
+}

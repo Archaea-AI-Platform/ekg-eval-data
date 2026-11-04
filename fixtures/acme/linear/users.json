@@ -1,0 +1,42 @@
+[
+ {
+  "id": "lin-u-alice",
+  "name": "Alice Ng",
+  "displayName": "alice",
+  "email": "alice@acme.io",
+  "active": true,
+  "admin": true,
+  "guest": false,
+  "createdAt": "2026-01-05T09:00:00.000Z"
+ },
+ {
+  "id": "lin-u-bob",
+  "name": "Bob Ruiz",
+  "displayName": "bob",
+  "email": "bob@acme.io",
+  "active": true,
+  "admin": false,
+  "guest": false,
+  "createdAt": "2026-01-05T09:00:00.000Z"
+ },
+ {
+  "id": "lin-u-carol",
+  "name": "Carol Diaz",
+  "displayName": "carol",
+  "email": "carol@contractor.dev",
+  "active": true,
+  "admin": false,
+  "guest": true,
+  "createdAt": "2026-01-05T09:00:00.000Z"
+ },
+ {
+  "id": "lin-u-dave",
+  "name": "Dave Okafor",
+  "displayName": "dave",
+  "email": "dave@acme.io",
+  "active": true,
+  "admin": false,
+  "guest": false,
+  "createdAt": "2026-01-05T09:00:00.000Z"
+ }
+]

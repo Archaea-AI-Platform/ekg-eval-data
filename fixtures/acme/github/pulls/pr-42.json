@@ -1,0 +1,83 @@
+{
+ "pull": {
+  "id": 7700042,
+  "number": 42,
+  "title": "Fix double refund on retry",
+  "state": "closed",
+  "draft": false,
+  "created_at": "2026-10-02T08:30:00Z",
+  "merged_at": "2026-10-03T14:58:00Z",
+  "closed_at": "2026-10-03T14:58:00Z",
+  "base": {
+   "ref": "main",
+   "label": "acme:main"
+  },
+  "head": {
+   "ref": "bob/eng-1-refund-retries-double-charge",
+   "label": "acme:bob/eng-1-refund-retries-double-charge"
+  },
+  "user": {
+   "id": 501,
+   "login": "bob-gh",
+   "type": "User"
+  },
+  "merged_by": {
+   "id": 500,
+   "login": "alice-gh",
+   "type": "User"
+  },
+  "body": "Stops the retry from refunding twice.",
+  "merge_commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "labels": []
+ },
+ "reviews": [
+  {
+   "id": 8801,
+   "user": {
+    "id": 500,
+    "login": "alice-gh",
+    "type": "User"
+   },
+   "state": "APPROVED",
+   "submitted_at": "2026-10-03T14:50:00Z",
+   "commit_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+   "body": "LGTM"
+  }
+ ],
+ "review_comments": [],
+ "issue_comments": [],
+ "commits": [
+  {
+   "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+   "commit": {
+    "committer": {
+     "date": "2026-10-02T08:29:00Z"
+    }
+   }
+  }
+ ],
+ "files": [
+  {
+   "filename": "src/refunds.py",
+   "status": "modified",
+   "additions": 10,
+   "deletions": 2
+  }
+ ],
+ "timeline": [
+  {
+   "event": "review_requested",
+   "created_at": "2026-10-02T08:31:00Z",
+   "requested_reviewer": {
+    "id": 500,
+    "login": "alice-gh",
+    "type": "User"
+   },
+   "actor": {
+    "id": 501,
+    "login": "bob-gh",
+    "type": "User"
+   }
+  }
+ ]
+}

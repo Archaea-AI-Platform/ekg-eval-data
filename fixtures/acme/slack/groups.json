@@ -1,0 +1,19 @@
+[
+ {
+  "id": "G01SEC",
+  "name": "sec-incident",
+  "created": 1790927700,
+  "creator": "U04DAVE",
+  "is_archived": false,
+  "members": [
+   "U01ALICE",
+   "U04DAVE"
+  ],
+  "topic": {
+   "value": ""
+  },
+  "purpose": {
+   "value": "Incident room"
+  }
+ }
+]

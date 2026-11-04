@@ -1,0 +1,34 @@
+[
+ {
+  "type": "message",
+  "ts": "1790928060.000100",
+  "user": "U04DAVE",
+  "text": "Webhook secret leaked, tracking in SEC-1"
+ },
+ {
+  "type": "message",
+  "subtype": "group_join",
+  "ts": "1790929200.000100",
+  "user": "U05EVE",
+  "text": "<@U05EVE> has joined"
+ },
+ {
+  "type": "message",
+  "ts": "1790929500.000100",
+  "user": "U05EVE",
+  "text": "Customer-facing comms drafted"
+ },
+ {
+  "type": "message",
+  "subtype": "group_leave",
+  "ts": "1790931600.000100",
+  "user": "U05EVE",
+  "text": "<@U05EVE> has left"
+ },
+ {
+  "type": "message",
+  "ts": "1790933460.000100",
+  "user": "U01ALICE",
+  "text": "Rotated, SEC-1 done"
+ }
+]

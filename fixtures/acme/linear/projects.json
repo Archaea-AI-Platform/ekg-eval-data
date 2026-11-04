@@ -1,0 +1,49 @@
+[
+ {
+  "id": "proj-refunds",
+  "name": "Refund retries",
+  "description": "Make refund retries safe.",
+  "state": "started",
+  "status": {
+   "name": "In Progress",
+   "type": "started"
+  },
+  "health": "atRisk",
+  "startDate": "2026-09-28",
+  "targetDate": "2026-10-31",
+  "lead": {
+   "id": "lin-u-alice"
+  },
+  "teams": {
+   "nodes": [
+    {
+     "id": "team-eng"
+    }
+   ]
+  },
+  "createdAt": "2026-09-20T10:00:00.000Z",
+  "projectUpdates": {
+   "nodes": [
+    {
+     "id": "pu-1",
+     "body": "Double refunds found; idempotency keys first.",
+     "health": "atRisk",
+     "createdAt": "2026-10-02T17:00:00.000Z",
+     "user": {
+      "id": "lin-u-alice"
+     }
+    }
+   ]
+  },
+  "projectMilestones": {
+   "nodes": [
+    {
+     "id": "ms-beta",
+     "name": "Beta",
+     "targetDate": "2026-10-15",
+     "createdAt": "2026-09-20T10:00:00.000Z"
+    }
+   ]
+  }
+ }
+]

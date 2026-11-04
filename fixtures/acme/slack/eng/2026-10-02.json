@@ -1,0 +1,29 @@
+[
+ {
+  "type": "message",
+  "ts": "1790930400.000100",
+  "user": "U01ALICE",
+  "text": "PR is up: <https://github.com/acme/payments/pull/42|payments#42>, ENG-2 next",
+  "edited": {
+   "user": "U01ALICE",
+   "ts": "1790930460.000100"
+  }
+ },
+ {
+  "type": "message",
+  "subtype": "file_share",
+  "ts": "1790932500.000100",
+  "user": "U02BOB",
+  "text": "retry log",
+  "files": [
+   {
+    "id": "F01LOG",
+    "name": "retry.log",
+    "title": "retry log",
+    "mimetype": "text/plain",
+    "created": 1790932500,
+    "user": "U02BOB"
+   }
+  ]
+ }
+]

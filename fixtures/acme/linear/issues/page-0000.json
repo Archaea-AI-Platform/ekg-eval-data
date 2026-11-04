@@ -1,0 +1,391 @@
+[
+ {
+  "id": "iss-1",
+  "identifier": "ENG-1",
+  "number": 1,
+  "title": "Refund retries double-charge customers",
+  "description": "Customers are refunded twice when the retry fires. Blocked by ENG-2.",
+  "priority": 1,
+  "priorityLabel": "Urgent",
+  "estimate": 3,
+  "createdAt": "2026-10-01T10:05:00.000Z",
+  "updatedAt": "2026-10-03T15:00:00.000Z",
+  "startedAt": "2026-10-01T11:00:00.000Z",
+  "completedAt": "2026-10-03T15:00:00.000Z",
+  "canceledAt": null,
+  "dueDate": "2026-10-04",
+  "archivedAt": null,
+  "trashed": null,
+  "branchName": "bob/eng-1-refund-retries-double-charge",
+  "url": "https://linear.app/acme/issue/ENG-1",
+  "state": {
+   "id": "st-done"
+  },
+  "team": {
+   "id": "team-eng"
+  },
+  "assignee": {
+   "id": "lin-u-bob"
+  },
+  "creator": {
+   "id": "lin-u-bob"
+  },
+  "project": {
+   "id": "proj-refunds"
+  },
+  "cycle": {
+   "id": "cy-12"
+  },
+  "projectMilestone": {
+   "id": "ms-beta"
+  },
+  "parent": null,
+  "labels": {
+   "nodes": [
+    {
+     "id": "lb-bug"
+    },
+    {
+     "id": "lb-payments"
+    }
+   ]
+  },
+  "subscribers": {
+   "nodes": [
+    {
+     "id": "lin-u-alice"
+    },
+    {
+     "id": "lin-u-bob"
+    }
+   ]
+  },
+  "history": {
+   "nodes": [
+    {
+     "id": "h-1a",
+     "createdAt": "2026-10-01T10:05:00.000Z",
+     "actorId": "lin-u-bob",
+     "fromStateId": null,
+     "toStateId": "st-triage",
+     "addedLabelIds": [
+      "lb-bug"
+     ]
+    },
+    {
+     "id": "h-1b",
+     "createdAt": "2026-10-01T11:00:00.000Z",
+     "actorId": "lin-u-alice",
+     "fromStateId": "st-triage",
+     "toStateId": "st-prog",
+     "fromAssigneeId": null,
+     "toAssigneeId": "lin-u-bob",
+     "addedLabelIds": [
+      "lb-payments"
+     ]
+    },
+    {
+     "id": "h-1c",
+     "createdAt": "2026-10-03T15:00:00.000Z",
+     "actorId": null,
+     "fromStateId": "st-prog",
+     "toStateId": "st-done",
+     "autoClosed": true
+    }
+   ]
+  },
+  "comments": {
+   "nodes": [
+    {
+     "id": "cm-1",
+     "body": "Root cause is the retry path; ENG-2 adds idempotency keys.",
+     "createdAt": "2026-10-01T12:00:00.000Z",
+     "updatedAt": "2026-10-01T12:00:00.000Z",
+     "editedAt": null,
+     "user": {
+      "id": "lin-u-alice"
+     },
+     "parent": null,
+     "resolvedAt": null,
+     "resolvingUser": null
+    },
+    {
+     "id": "cm-2",
+     "body": "Fix is in https://github.com/acme/payments/pull/42",
+     "createdAt": "2026-10-02T09:00:00.000Z",
+     "updatedAt": "2026-10-02T09:00:00.000Z",
+     "editedAt": null,
+     "user": {
+      "id": "lin-u-bob"
+     },
+     "parent": {
+      "id": "cm-1"
+     },
+     "resolvedAt": "2026-10-03T15:10:00.000Z",
+     "resolvingUser": {
+      "id": "lin-u-alice"
+     }
+    }
+   ]
+  },
+  "attachments": {
+   "nodes": [
+    {
+     "id": "att-slack",
+     "title": "Slack message in #eng",
+     "sourceType": "slack",
+     "createdAt": "2026-10-01T10:05:00.000Z",
+     "url": "https://acme.slack.com/archives/C01ENG/p1790848800000100"
+    },
+    {
+     "id": "att-pr",
+     "title": "Fix double refund on retry #42",
+     "sourceType": "github",
+     "createdAt": "2026-10-02T08:30:00.000Z",
+     "url": "https://github.com/acme/payments/pull/42"
+    }
+   ]
+  },
+  "relations": {
+   "nodes": []
+  }
+ },
+ {
+  "id": "iss-2",
+  "identifier": "ENG-2",
+  "number": 2,
+  "title": "Add idempotency keys to the refund API",
+  "description": "Needed before ENG-1 can be closed for good.",
+  "priority": 2,
+  "priorityLabel": "High",
+  "estimate": 5,
+  "createdAt": "2026-10-01T12:30:00.000Z",
+  "updatedAt": "2026-10-02T10:00:00.000Z",
+  "startedAt": "2026-10-02T10:00:00.000Z",
+  "completedAt": null,
+  "canceledAt": null,
+  "dueDate": null,
+  "archivedAt": null,
+  "trashed": null,
+  "branchName": "alice/eng-2-idempotency-keys",
+  "url": "https://linear.app/acme/issue/ENG-2",
+  "state": {
+   "id": "st-prog"
+  },
+  "team": {
+   "id": "team-eng"
+  },
+  "assignee": {
+   "id": "lin-u-alice"
+  },
+  "creator": {
+   "id": "lin-u-alice"
+  },
+  "project": {
+   "id": "proj-refunds"
+  },
+  "cycle": {
+   "id": "cy-12"
+  },
+  "projectMilestone": null,
+  "parent": null,
+  "labels": {
+   "nodes": []
+  },
+  "subscribers": {
+   "nodes": [
+    {
+     "id": "lin-u-alice"
+    }
+   ]
+  },
+  "history": {
+   "nodes": [
+    {
+     "id": "h-2a",
+     "createdAt": "2026-10-01T12:30:00.000Z",
+     "actorId": "lin-u-alice",
+     "toStateId": "st-todo"
+    },
+    {
+     "id": "h-2b",
+     "createdAt": "2026-10-02T10:00:00.000Z",
+     "actorId": "lin-u-alice",
+     "fromStateId": "st-todo",
+     "toStateId": "st-prog",
+     "toAssigneeId": "lin-u-alice",
+     "fromPriority": 3,
+     "toPriority": 2
+    }
+   ]
+  },
+  "comments": {
+   "nodes": []
+  },
+  "attachments": {
+   "nodes": []
+  },
+  "relations": {
+   "nodes": [
+    {
+     "id": "rel-1",
+     "type": "blocks",
+     "relatedIssue": {
+      "id": "iss-1",
+      "identifier": "ENG-1"
+     },
+     "createdAt": "2026-10-01T12:31:00.000Z"
+    }
+   ]
+  }
+ },
+ {
+  "id": "iss-3",
+  "identifier": "ENG-3",
+  "number": 3,
+  "title": "Duplicate refunds on retry",
+  "description": null,
+  "priority": 0,
+  "priorityLabel": "No priority",
+  "estimate": null,
+  "createdAt": "2026-10-01T13:00:00.000Z",
+  "updatedAt": "2026-10-01T13:10:00.000Z",
+  "startedAt": null,
+  "completedAt": null,
+  "canceledAt": "2026-10-01T13:10:00.000Z",
+  "dueDate": null,
+  "archivedAt": null,
+  "trashed": null,
+  "branchName": "carol/eng-3-duplicate-refunds-on-retry",
+  "url": "https://linear.app/acme/issue/ENG-3",
+  "state": {
+   "id": "st-cancel"
+  },
+  "team": {
+   "id": "team-eng"
+  },
+  "assignee": null,
+  "creator": {
+   "id": "lin-u-carol"
+  },
+  "project": null,
+  "cycle": null,
+  "projectMilestone": null,
+  "parent": null,
+  "labels": {
+   "nodes": []
+  },
+  "subscribers": {
+   "nodes": []
+  },
+  "history": {
+   "nodes": [
+    {
+     "id": "h-3a",
+     "createdAt": "2026-10-01T13:10:00.000Z",
+     "actorId": "lin-u-bob",
+     "fromStateId": "st-triage",
+     "toStateId": "st-cancel"
+    }
+   ]
+  },
+  "comments": {
+   "nodes": []
+  },
+  "attachments": {
+   "nodes": []
+  },
+  "relations": {
+   "nodes": [
+    {
+     "id": "rel-2",
+     "type": "duplicate",
+     "relatedIssue": {
+      "id": "iss-1",
+      "identifier": "ENG-1"
+     },
+     "createdAt": "2026-10-01T13:10:00.000Z"
+    }
+   ]
+  }
+ },
+ {
+  "id": "iss-s1",
+  "identifier": "SEC-1",
+  "number": 1,
+  "title": "Rotate the leaked webhook signing secret",
+  "description": "Found in a public gist.",
+  "priority": 1,
+  "priorityLabel": "Urgent",
+  "estimate": 1,
+  "createdAt": "2026-10-02T08:00:00.000Z",
+  "updatedAt": "2026-10-02T09:30:00.000Z",
+  "startedAt": "2026-10-02T08:10:00.000Z",
+  "completedAt": "2026-10-02T09:30:00.000Z",
+  "canceledAt": null,
+  "dueDate": null,
+  "archivedAt": null,
+  "trashed": null,
+  "branchName": "dave/sec-1-rotate-webhook-secret",
+  "url": "https://linear.app/acme/issue/SEC-1",
+  "state": {
+   "id": "sst-done"
+  },
+  "team": {
+   "id": "team-sec"
+  },
+  "assignee": {
+   "id": "lin-u-dave"
+  },
+  "creator": {
+   "id": "lin-u-dave"
+  },
+  "project": null,
+  "cycle": null,
+  "projectMilestone": null,
+  "parent": null,
+  "labels": {
+   "nodes": []
+  },
+  "subscribers": {
+   "nodes": [
+    {
+     "id": "lin-u-alice"
+    }
+   ]
+  },
+  "history": {
+   "nodes": [
+    {
+     "id": "h-s1a",
+     "createdAt": "2026-10-02T08:00:00.000Z",
+     "actorId": "lin-u-dave",
+     "toStateId": "sst-todo"
+    },
+    {
+     "id": "h-s1b",
+     "createdAt": "2026-10-02T08:10:00.000Z",
+     "actorId": "lin-u-dave",
+     "fromStateId": "sst-todo",
+     "toStateId": "sst-prog"
+    },
+    {
+     "id": "h-s1c",
+     "createdAt": "2026-10-02T09:30:00.000Z",
+     "actorId": "lin-u-dave",
+     "fromStateId": "sst-prog",
+     "toStateId": "sst-done"
+    }
+   ]
+  },
+  "comments": {
+   "nodes": []
+  },
+  "attachments": {
+   "nodes": []
+  },
+  "relations": {
+   "nodes": []
+  }
+ }
+]

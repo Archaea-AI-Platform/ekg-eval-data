@@ -1,0 +1,8 @@
+{
+ "id": 9001,
+ "full_name": "acme/payments",
+ "visibility": "private",
+ "archived": false,
+ "fork": false,
+ "default_branch": "main"
+}

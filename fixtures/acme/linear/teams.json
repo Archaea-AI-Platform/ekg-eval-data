@@ -1,0 +1,149 @@
+[
+ {
+  "id": "team-eng",
+  "key": "ENG",
+  "name": "Engineering",
+  "private": false,
+  "cyclesEnabled": true,
+  "cycleDuration": 2,
+  "triageEnabled": true,
+  "createdAt": "2026-01-05T09:00:00.000Z",
+  "states": {
+   "nodes": [
+    {
+     "id": "st-triage",
+     "name": "Triage",
+     "type": "triage",
+     "position": 0
+    },
+    {
+     "id": "st-backlog",
+     "name": "Backlog",
+     "type": "backlog",
+     "position": 1
+    },
+    {
+     "id": "st-todo",
+     "name": "Todo",
+     "type": "unstarted",
+     "position": 2
+    },
+    {
+     "id": "st-prog",
+     "name": "In Progress",
+     "type": "started",
+     "position": 3
+    },
+    {
+     "id": "st-done",
+     "name": "Done",
+     "type": "completed",
+     "position": 4
+    },
+    {
+     "id": "st-cancel",
+     "name": "Canceled",
+     "type": "canceled",
+     "position": 5
+    }
+   ]
+  },
+  "labels": {
+   "nodes": [
+    {
+     "id": "lb-bug",
+     "name": "bug",
+     "isGroup": false,
+     "parent": null
+    },
+    {
+     "id": "lb-area",
+     "name": "area",
+     "isGroup": true,
+     "parent": null
+    },
+    {
+     "id": "lb-payments",
+     "name": "payments",
+     "isGroup": false,
+     "parent": {
+      "id": "lb-area"
+     }
+    }
+   ]
+  },
+  "members": {
+   "nodes": [
+    {
+     "id": "lin-u-alice"
+    },
+    {
+     "id": "lin-u-bob"
+    },
+    {
+     "id": "lin-u-carol"
+    }
+   ]
+  },
+  "cycles": {
+   "nodes": [
+    {
+     "id": "cy-12",
+     "number": 12,
+     "name": null,
+     "startsAt": "2026-09-28T00:00:00.000Z",
+     "endsAt": "2026-10-12T00:00:00.000Z",
+     "completedAt": null
+    }
+   ]
+  }
+ },
+ {
+  "id": "team-sec",
+  "key": "SEC",
+  "name": "Security",
+  "private": true,
+  "cyclesEnabled": false,
+  "cycleDuration": null,
+  "triageEnabled": false,
+  "createdAt": "2026-02-01T09:00:00.000Z",
+  "states": {
+   "nodes": [
+    {
+     "id": "sst-todo",
+     "name": "Todo",
+     "type": "unstarted",
+     "position": 0
+    },
+    {
+     "id": "sst-prog",
+     "name": "In Progress",
+     "type": "started",
+     "position": 1
+    },
+    {
+     "id": "sst-done",
+     "name": "Done",
+     "type": "completed",
+     "position": 2
+    }
+   ]
+  },
+  "labels": {
+   "nodes": []
+  },
+  "members": {
+   "nodes": [
+    {
+     "id": "lin-u-alice"
+    },
+    {
+     "id": "lin-u-dave"
+    }
+   ]
+  },
+  "cycles": {
+   "nodes": []
+  }
+ }
+]

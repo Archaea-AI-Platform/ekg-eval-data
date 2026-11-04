@@ -1,0 +1,119 @@
+[
+ {
+  "id": "U01ALICE",
+  "team_id": "T0ACME",
+  "name": "alice",
+  "deleted": false,
+  "real_name": "Alice Ng",
+  "tz": "Europe/London",
+  "is_bot": false,
+  "is_admin": true,
+  "is_owner": true,
+  "is_restricted": false,
+  "is_ultra_restricted": false,
+  "profile": {
+   "real_name": "Alice Ng",
+   "display_name": "alice",
+   "email": "alice@acme.io",
+   "title": ""
+  }
+ },
+ {
+  "id": "U02BOB",
+  "team_id": "T0ACME",
+  "name": "bob",
+  "deleted": false,
+  "real_name": "Bob Ruiz",
+  "tz": "Europe/London",
+  "is_bot": false,
+  "is_admin": false,
+  "is_owner": false,
+  "is_restricted": false,
+  "is_ultra_restricted": false,
+  "profile": {
+   "real_name": "Bob Ruiz",
+   "display_name": "bob",
+   "email": "bob@acme.io",
+   "title": ""
+  }
+ },
+ {
+  "id": "U03CAROL",
+  "team_id": "T0ACME",
+  "name": "carol",
+  "deleted": false,
+  "real_name": "Carol Diaz",
+  "tz": "Europe/London",
+  "is_bot": false,
+  "is_admin": false,
+  "is_owner": false,
+  "is_restricted": true,
+  "is_ultra_restricted": false,
+  "profile": {
+   "real_name": "Carol Diaz",
+   "display_name": "carol",
+   "email": "carol@contractor.dev",
+   "title": ""
+  }
+ },
+ {
+  "id": "U04DAVE",
+  "team_id": "T0ACME",
+  "name": "dave",
+  "deleted": false,
+  "real_name": "Dave Okafor",
+  "tz": "Europe/London",
+  "is_bot": false,
+  "is_admin": false,
+  "is_owner": false,
+  "is_restricted": false,
+  "is_ultra_restricted": false,
+  "profile": {
+   "real_name": "Dave Okafor",
+   "display_name": "dave",
+   "email": "dave@acme.io",
+   "title": ""
+  }
+ },
+ {
+  "id": "U05EVE",
+  "team_id": "T0ACME",
+  "name": "eve",
+  "deleted": false,
+  "real_name": "Eve Park",
+  "tz": "Europe/London",
+  "is_bot": false,
+  "is_admin": false,
+  "is_owner": false,
+  "is_restricted": false,
+  "is_ultra_restricted": false,
+  "profile": {
+   "real_name": "Eve Park",
+   "display_name": "eve",
+   "email": "eve@acme.io",
+   "title": ""
+  }
+ },
+ {
+  "id": "USLACKBOT",
+  "team_id": "T0ACME",
+  "name": "slackbot",
+  "deleted": false,
+  "is_bot": false,
+  "profile": {
+   "real_name": "Slackbot"
+  }
+ },
+ {
+  "id": "U09LINEAR",
+  "team_id": "T0ACME",
+  "name": "linear",
+  "deleted": false,
+  "is_bot": true,
+  "profile": {
+   "real_name": "Linear",
+   "bot_id": "B01LIN",
+   "api_app_id": "A01LIN"
+  }
+ }
+]
