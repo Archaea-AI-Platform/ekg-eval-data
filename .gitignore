@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+
+# never commit secrets or backups
+.env
+.env.*
+*.bak

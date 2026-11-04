@@ -136,3 +136,23 @@ Positive controls make sure an access layer that showed nothing at all would fai
 - **Permissions are not tested.** Everything here is public. To test the access layer, add synthetic overlays: put some Jira issues under a security level, mark a list as private with `history: since_joined`, add Bcc copies and late joiners. For private data that already exists, use [HERB](https://huggingface.co/datasets/Salesforce/HERB) or [TheAgentCompany](https://github.com/TheAgentCompany/TheAgentCompany).
 - **Not covered:** chat (ASF Slack has no public export), calendars, call transcripts, and dated HR reporting lines. HERB covers chat and meetings, the AMI corpus covers transcripts.
 - **Real personal data:** names and email addresses of real people. Keep it in the local eval environment and do not commit it. `ekg-eval-raw/` is outside every service folder for that reason.
+
+## Filling the gaps with the LLM
+
+`fill_graph.py` runs after `build_graph.py`. Code finds every link or field the adapters left empty and the candidates for it; query-master's own LLM client accepts one candidate or rejects them all. No person reviews the result. Code then checks every acceptance: the choice must be a candidate, the quote must appear word for word in the text shown, and the result must pass query-master's validator. Accepted answers become `llm_judge` links in `<graph>/llm/`. Every verdict, including rejects, goes to `ledger.jsonl`, which is also the cache. `patterns.json` lists the recurring cues behind accepted answers, which are candidates for new adapter rules.
+
+```bash
+export LLM_BACKEND=openrouter OPENROUTER_API_KEYS=<key> EKG_LLM_MODEL=mistralai/devstral-2512
+python -I ekg-eval-data/fill_graph.py --dry-run      # gaps and candidates per kind, no LLM
+python -I ekg-eval-data/fill_graph.py --smoke 2      # two real calls, nothing written
+python -I ekg-eval-data/fill_graph.py --limit 50     # ask, check, write
+```
+
+## Saving: query-master's schema as SQLite
+
+`save_graph.py` writes `<graph>/graph.sqlite` with query-master's four EKG tables: `ekg_registry_types`, `ekg_registry_links`, `ekg_records` and `ekg_links`. The tables are generated from `app/ekg/models.py`, so the columns match it. Rows are built the way `app/ekg/schema/store.py` builds them, and every row is validated first. SQLite triggers refuse deletes and changes to a record's identity. Read-only views `node` and `claim` give the same data under the root schema's names (ekg-schema.html v0.8). `run_pipeline.py` runs the three stages in order: parse, then LLM, then save. Each stage keeps its JSONL.
+
+```bash
+python -I ekg-eval-data/save_graph.py --graph ekg-eval-out/apache-kafka
+python -I ekg-eval-data/run_pipeline.py --data ekg-eval-raw/apache-kafka            # parse -> LLM -> SQLite
+```
