@@ -86,7 +86,11 @@ def main() -> int:
     check("the Linear bot's post ANNOUNCES ENG-1", g.linked("ANNOUNCES", bot, eng1, kind="notify"))
     check("Bob's reply MENTIONS ENG-1 by key", g.linked("MENTIONS", reply, eng1, kind="key"))
     check("Alice's message MENTIONS ENG-2", g.linked("MENTIONS", pr_msg, eng2, kind="key"))
-    check("the root message mentions Bob", g.linked("MENTIONS", root, g.native("Account", "slack", "U02BOB")))
+    check("the root message mentions Bob (kind mention)",
+          g.linked("MENTIONS", root, g.native("Account", "slack", "U02BOB"), kind="mention"))
+    in_channel = [lk for lk in g.links if lk["type"] == "IN" and thread["id"] in (lk["a"], lk["b"])
+                  and {g.by_id[lk["a"]]["type"], g.by_id[lk["b"]]["type"]} == {"Thread", "Channel"}]
+    check("the Slack thread is IN its channel", in_channel)
     # Linear <-> GitHub
     check("PR 42 IMPLEMENTS ENG-1 through the branch name", g.linked("IMPLEMENTS", pr42, eng1, link_method="branch_name"))
     check("ENG-1 LINKS_TO PR 42 (Linear's GitHub attachment)", g.linked("LINKS_TO", eng1, pr42, method="integration"))

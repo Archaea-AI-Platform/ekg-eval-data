@@ -184,8 +184,7 @@ def _history(g, t, i, states, labels, acct, scope):
     """IN_STATE, ASSIGNED_TO and HAS_LABEL intervals, and one Activity per history entry."""
     hist = sorted(nodes(i.get("history")), key=lambda h: h["createdAt"])
     created = utc(i["createdAt"])
-    # an automatic close on a GitHub-linked issue is the merge closing it; the registry's cause enum has no
-    # plain "automation" (the spec says it adds one), so other automatic changes carry no cause
+    # an automatic close on a GitHub-linked issue is the merge closing it; other automatic changes are automation
     via_git = any(a.get("sourceType") == "github" for a in nodes(i.get("attachments")))
 
     def cause(auto):
@@ -193,8 +192,7 @@ def _history(g, t, i, states, labels, acct, scope):
             return "manual"
         if via_git:
             return "git_automation"
-        g.notes["linear: automatic state change with no schema cause (registry lacks 'automation')"] += 1
-        return None
+        return "automation"
 
     def intervals(link_type, from_key, to_key, current, targets):
         moves = [(utc(h["createdAt"]), h) for h in hist if h.get(to_key) or h.get(from_key)]

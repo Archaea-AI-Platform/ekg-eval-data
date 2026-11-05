@@ -197,6 +197,7 @@ def _message(g, chan, cid, m, at, scope, account, names, key_rx):
         if tkey not in threads:
             threads[tkey] = g.rec("Thread", "slack", tkey, {"kind": "chat", "thread_ts": m["thread_ts"],
                                   "created_at": ts_utc(m["thread_ts"])}, scope, acl_from=chan)
+            g.link("IN", threads[tkey], chan, "field", valid_from=ts_utc(m["thread_ts"]))
         g.link("IN", msg, threads[tkey], "field", valid_from=at)
     if author:
         g.link("AUTHORED_BY", msg, author, "field", role="author", at=at)
@@ -214,13 +215,10 @@ def _message(g, chan, cid, m, at, scope, account, names, key_rx):
             g.link("CREATED_BY", fr, account(f["user"]), "field", role="uploader", how="upload", at=ts_utc(f.get("created")))
     # references: people, channels, links, ticket keys; integration bots announce instead of mention
     notifier = _notifier(author, bot)
-    # the spec names kind mention / channel for these, but the registry's MENTIONS kind enum lacks them
     for uid in set(USER.findall(raw)):
-        g.link("MENTIONS", msg, account(uid), "field", at=at)
-        g.notes["slack: person and channel mentions with no schema kind (registry lacks 'mention', 'channel')"] += 1
+        g.link("MENTIONS", msg, account(uid), "field", kind="mention", at=at)
     for other, _ in set(CHANNEL.findall(raw)):
-        g.ref(msg, "MENTIONS", "Channel", other, "field", at=at)
-        g.notes["slack: person and channel mentions with no schema kind (registry lacks 'mention', 'channel')"] += 1
+        g.ref(msg, "MENTIONS", "Channel", other, "field", kind="channel", at=at)
     url_keys = set()
     for url, _ in LINK.findall(raw):
         pr = PR_URL.match(url)

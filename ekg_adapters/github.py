@@ -3,7 +3,7 @@ labels (dated from the timeline), review requests, changed files, CI workflows a
 
 APPROVED_BY is derived from the reviews (derived, with a rule id) and marked stale
 when a commit landed after the approval. References queued for the linker: ticket
-keys and KIP numbers in PR titles.
+keys and decision keys (settings) in PR titles, ticket keys in branch names, and "Fixes #n" in descriptions.
 """
 
 import re
@@ -12,13 +12,15 @@ from pathlib import Path
 from .access import place
 from .common import Graph, J, file_props, ticket_rx, utc
 
-KIP = re.compile(r"\bKIP-(\d+)\b")
+CLOSES = re.compile(r"\b(close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s+#(\d+)\b", re.I)
 CHANGE_TYPE = {"added": "added", "removed": "removed", "modified": "modified", "renamed": "renamed",
                "copied": "copied", "changed": "modified", "unchanged": "modified"}
 
 
 def map_github(g: Graph, d: Path, repo_name: str):
     key_rx = ticket_rx(g)
+    prefix = g.ctx["settings"].get("decision_prefix")
+    decision_rx = re.compile(rf"\b{re.escape(prefix)}-(\d+)\b") if prefix else None
     repo_json = J(d / "github/repo.json")
     public = repo_json.get("visibility", "public") == "public" and not repo_json.get("private")
     scope, access = place(g, "github", "repo", repo_name, public=public)
@@ -88,16 +90,25 @@ def map_github(g: Graph, d: Path, repo_name: str):
                        "text": p["body"], "note": "description"}, scope, acl_from=pr)
             g.link("VERSION_OF", cv, pr, "field", kind="revision", order=1)
 
-        # references: ticket keys and KIPs named in the title
-        for k in sorted(set(key_rx.findall(p["title"]))):
+        # references: ticket keys and decision keys named in the title, and ticket keys in the branch name
+        title_keys = set(key_rx.findall(p["title"]))
+        for k in sorted(title_keys):
             g.ref(pr, "IMPLEMENTS", "Ticket", k, "convention", 0.9, stub=True, valid_from=created, link_method="pr_title",
+                  closes_on_merge=False)
+        for k in sorted(set(key_rx.findall(p["head"]["ref"].upper().replace("_", "-"))) - title_keys):
+            g.ref(pr, "IMPLEMENTS", "Ticket", k, "convention", 0.85, valid_from=created, link_method="branch_name",
                   closes_on_merge=False)
         # a tracker that names branches after the issue (Linear's branchName) links the PR by its head branch
         if g.ctx.get("ticket_by_branch"):
             g.ref(pr, "IMPLEMENTS", "TicketByBranch", p["head"]["ref"], "convention", 0.9, valid_from=created,
                   link_method="branch_name", closes_on_merge=True)
-        for n in set(KIP.findall(p["title"])):
-            g.ref(pr, "ENACTS", "Decision", int(n), "convention", 0.9, valid_from=created)
+        if decision_rx:
+            for n in set(decision_rx.findall(p["title"])):
+                g.ref(pr, "ENACTS", "Decision", int(n), "convention", 0.9, valid_from=created)
+        if g.ctx["settings"].get("issue_tracker") == "github":  # "Fixes #12" in the description closes that issue
+            for n in sorted({int(x) for _, x in CLOSES.findall(p.get("body") or "")} - {p["number"]}):
+                g.ref(pr, "IMPLEMENTS", "GitHubIssue", n, "convention", 0.95, valid_from=created,
+                      link_method="closing_keyword", magic_word=True, closes_on_merge=True)
 
         # files changed
         for fch in x["files"]:

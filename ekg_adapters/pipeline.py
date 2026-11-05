@@ -26,6 +26,11 @@ from .mail import map_mail
 from .people import map_people
 from .slack import map_slack
 from .wiki import map_wiki
+from .code import map_code
+from .docs import map_docs
+from .forum import map_forum
+from .issues import map_issues
+from .settings import check_inputs, load_manifest, project_settings
 
 
 def raw_pass(d: Path):
@@ -47,13 +52,13 @@ def raw_pass(d: Path):
     for p in sorted((d / "jira/issues").glob("*.json")) if (d / "jira").is_dir() else []:
         for i in J(p)["issues"]:
             check("Jira issue as Ticket", "Ticket", "jira", i["id"], i["fields"])
-    for p in sorted((d / "github/pulls").glob("pr-*.json")):
+    for p in sorted((d / "github/pulls").glob("pr-*.json")) if (d / "github").is_dir() else []:
         pr = J(p)["pull"]
         check("GitHub PR as PullRequest", "PullRequest", "github", pr["id"], pr)
     for line in open(d / "git/commits.jsonl", encoding="utf-8") if (d / "git/commits.jsonl").exists() else []:
         c = json.loads(line)
         check("git commit as Commit", "Commit", "git", c["sha"], c)
-    for p in sorted((d / "wiki/pages").glob("*.json")):
+    for p in sorted((d / "wiki/pages").glob("*.json")) if (d / "wiki").is_dir() else []:
         for page in J(p)["results"]:
             check("wiki page as Document", "Document", "confluence", page["id"],
                   {k: v for k, v in page.items() if not k.startswith("_")})
@@ -109,16 +114,37 @@ def coverage(g: Graph):
     return {k: v for k, v in measures.items() if v["of"] and needs.get(k, "Ticket") in present}
 
 
+ADAPTERS = [  # (source folder, step name, function, extra args from the manifest); trackers first, so later
+              # adapters recognise their ticket keys, and the GitHub adapter before git so the repo record is its
+    ("people", "people adapter", map_people, lambda m: [m["project"]]),
+    ("jira", "jira adapter", map_jira, lambda m: [m["jira"], m.get("repo", "")]),
+    ("linear", "linear adapter", map_linear, lambda m: []),
+    ("github", "github adapter", map_github, lambda m: [m.get("repo", "")]),
+    ("issues", "github issues adapter", map_issues, lambda m: []),
+    ("git", "git adapter", map_git, lambda m: []),
+    ("code", "code tree adapter", map_code, lambda m: []),
+    ("mail", "mail adapter", map_mail, lambda m: []),
+    ("slack", "slack adapter", map_slack, lambda m: []),
+    ("forum", "forum adapter", map_forum, lambda m: []),
+    ("wiki", "wiki adapter + decisions", map_wiki, lambda m: []),
+    ("docs", "documents adapter", map_docs, lambda m: []),
+]
+
+
 def run(data: Path, query_master: Path, out: Path | None = None, raw_check: bool = False, log=print):
     """Run every adapter whose source folder is present in `data`, then link, resolve identity and validate."""
     common.bind(query_master)
-    manifest = J(data / "manifest.json")
-    common.set_tenant(manifest.get("tenant", "apache"))
+    manifest, manifest_notes = load_manifest(data)
+    common.set_tenant(manifest["tenant"])
     g = Graph(observed_at=manifest["fetched_at"])
     g.ctx["repo_name"] = manifest.get("repo", "")
     g.ctx["slack_workspace_name"] = manifest.get("slack_workspace")
+    g.ctx["settings"] = settings = project_settings(manifest, data)
     timings, t0 = {}, time.time()
-    present = lambda folder: (data / folder).is_dir()
+    for n in manifest_notes:
+        log(f"  note: {n}")
+    inputs = check_inputs(data, manifest)
+    adapters = {}
 
     def step(name, fn, *a):
         t = time.time()
@@ -128,23 +154,22 @@ def run(data: Path, query_master: Path, out: Path | None = None, raw_check: bool
         return res
 
     raw = step("raw pass", raw_pass, data) if raw_check else None
-    # trackers first, so every later adapter recognises their ticket keys
-    if present("people") and manifest.get("project"):
-        step("people adapter", map_people, g, data, manifest["project"])
-    if present("jira") and manifest.get("jira"):
-        step("jira adapter", map_jira, g, data, manifest["jira"], manifest.get("repo", ""))
-    if present("linear"):
-        step("linear adapter", map_linear, g, data)
-    if present("github"):
-        step("github adapter", map_github, g, data, manifest.get("repo", ""))
-    if present("git") and "repo" in g.ctx:
-        step("git adapter", map_git, g, data)
-    if present("mail"):
-        step("mail adapter", map_mail, g, data)
-    if present("slack"):
-        step("slack adapter", map_slack, g, data)
-    if present("wiki"):
-        step("wiki adapter + KIP decisions", map_wiki, g, data)
+    for folder, name, fn, args in ADAPTERS:
+        if folder not in inputs:
+            continue
+        check = inputs[folder]
+        for p in check["problems"]:
+            log(f"  {folder}: {p}")
+        if not check["run"]:
+            adapters[folder] = {"status": "skipped", "why": "; ".join(check["problems"])}
+            log(f"  {name}: SKIPPED ({adapters[folder]['why']})")
+            continue
+        try:
+            step(name, fn, g, data, *args(manifest))
+            adapters[folder] = {"status": "ran", "problems": check["problems"]}
+        except Exception as e:  # one adapter's failure is reported, and the others still run
+            adapters[folder] = {"status": "failed", "why": f"{type(e).__name__}: {e}"[:300]}
+            log(f"  {name}: FAILED ({adapters[folder]['why']})")
     linked = step("cross-source linker", resolve, g)
     identity = step("identity resolution", resolve_identity, g)
     cov = coverage(g)
@@ -159,8 +184,8 @@ def run(data: Path, query_master: Path, out: Path | None = None, raw_check: bool
                      "warnings": dict(v["warnings"].most_common(3))} for k, v in sorted(link_report.items())}
     return {
         "data": str(data), "window": manifest.get("window"), "project": manifest.get("project") or manifest.get("tenant"),
-        "tenant": common.TENANT, "out": str(out) if out else None,
-        "sources": [s for s in ("people", "jira", "linear", "github", "git", "mail", "slack", "wiki") if present(s)],
+        "tenant": common.TENANT, "out": str(out) if out else None, "settings": settings, "adapters": adapters,
+        "sources": [f for f, s in adapters.items() if s["status"] == "ran"],
         "totals": {"records": sum(v["checked"] for v in rec_rows.values()), "records_valid": sum(v["valid"] for v in rec_rows.values()),
                    "links": sum(v["checked"] for v in link_rows.values()), "links_valid": sum(v["valid"] for v in link_rows.values()),
                    "record_types": len({k.split(' (')[0] for k in rec_rows}), "link_types": len(link_rows)},

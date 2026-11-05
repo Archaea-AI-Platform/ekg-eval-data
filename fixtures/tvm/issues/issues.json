@@ -1,0 +1,54 @@
+[
+ {
+  "number": 101,
+  "title": "[Bug] Relax pass crashes on dynamic shapes",
+  "state": "CLOSED",
+  "stateReason": "COMPLETED",
+  "body": "Running the Relax pass on a model with dynamic shapes crashes. Seen with #99 too.",
+  "author": "alice-dev",
+  "labels": [
+   "type: bug",
+   "relax"
+  ],
+  "assignees": [
+   "bob-k"
+  ],
+  "createdAt": "2026-09-03T10:00:00Z",
+  "closedAt": "2026-09-20T12:00:00Z",
+  "linkedPullRequests": [
+   102
+  ],
+  "comments": [
+   {
+    "author": "bob-k",
+    "body": "I can reproduce it; fix in #102.",
+    "createdAt": "2026-09-04T09:00:00Z"
+   }
+  ]
+ },
+ {
+  "number": 99,
+  "title": "[Feature] Dynamic shape support in TIR",
+  "state": "OPEN",
+  "body": "Tracking issue.",
+  "author": "carol-z",
+  "labels": [
+   "type: feature"
+  ],
+  "createdAt": "2026-09-01T08:00:00Z",
+  "comments": []
+ },
+ {
+  "number": 103,
+  "title": "Duplicate of #101",
+  "state": "CLOSED",
+  "stateReason": "DUPLICATE",
+  "body": "same crash",
+  "author": "dave-q",
+  "createdAt": "2026-09-05T08:00:00Z",
+  "closedAt": "2026-09-05T09:00:00Z"
+ },
+ {
+  "title": "row without a number"
+ }
+]

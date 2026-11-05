@@ -26,7 +26,7 @@ from pathlib import Path
 
 from . import common, llm
 from .common import Graph
-from .fill_tasks import BUILDERS, KNOWLEDGE_KINDS, PROMPT_CAP, Task, View, _ordered
+from .fill_tasks import BUILDERS, GUIDELINE_STRENGTH, KNOWLEDGE_KINDS, PROMPT_CAP, Task, View, _ordered
 
 PROMPT_VERSION = "fill-v1"
 LLM_CONFIDENCE = 0.8  # the schema requires a number: fixed for every accepted LLM answer, never the model's own score
@@ -44,19 +44,29 @@ ANSWER = ('Reply with one JSON object: {{"verdict": "accept" or "reject", "choic
           "(e.g. 'Fixed in <branch> at <sha>', 'ticket key in the branch name'). Empty when you reject.\n"
           "- reason: one short sentence.")
 EXTRACT = ("List what a new engineer on this project would need to know later, as stated in this conversation:\n"
-           "- decision: something the participants decided, with why if they said it\n"
+           "- decision: something the participants decided; rationale: why, if they said it\n"
+           "- guideline: a rule the project follows (strength: must, should or avoid)\n"
+           "- requirement: something a feature or change has to do\n"
            f"- knowledge: a how_to, workaround, gotcha, norm, rationale, tip, warning or fact (kind: one of {', '.join(KNOWLEDGE_KINDS)})\n"
-           "- action_item: something a named person took on to do\n"
+           "- action_item: something a named person took on to do; owner: the label of a message that person "
+           "wrote, or none\n"
            "- question: a question asked and left without an answer\n"
            "Skip greetings, thanks, votes with no reason, CI output, and anything true only for this one change. "
            "At most 5 items; an empty list is a good answer when nothing qualifies.\n"
            "For each item: title (under 10 words), statement (one sentence, your words), quote (word for word "
-           "from one message, under 300 characters), source (that message's label).")
+           "from one message, under 300 characters), source (that message's label). A field that does not "
+           "apply to the item's type: an empty string, or none.")
 JUDGE_ITEMS = ("Below are items another pass proposed from this conversation. Accept an item only if its quote, in "
                "its source, really says it, and it would still be worth knowing a month from now. Reject guesses, "
                "chit-chat, and details true only for this one change.")
 RECORD_OF = {"knowledge": ("Knowledge", "statement", "EXTRACTED_FROM"), "decision": ("Decision", "statement", "MADE_IN"),
-             "action_item": ("ActionItem", "text", "RAISED_IN"), "question": ("Question", "text", "RAISED_IN")}
+             "action_item": ("ActionItem", "text", "RAISED_IN"), "question": ("Question", "text", "RAISED_IN"),
+             "guideline": ("Guideline", "statement", "EXTRACTED_FROM"),
+             "requirement": ("Requirement", "statement", "EXTRACTED_FROM")}
+# who an item came from: the author of its quoted message, through the link the schema has for its type
+EXTRACTS = {"knowledge", "doc_knowledge"}  # task kinds answered by extract-then-judge
+PERSON_LINK = {"Knowledge": ("AUTHORED_BY", {"role": "speaker"}), "Decision": ("DECIDED_BY", {"role": "decider"}),
+               "Question": ("ASKED_BY", {})}
 
 
 # ---------------------------------------------------------------- prompts and schemas
@@ -108,9 +118,12 @@ def extract_prompt(t: Task):
 
 def extract_schema(labels):
     item = {"type": "object", "additionalProperties": False,
-            "required": ["type", "kind", "title", "statement", "quote", "source"],
+            "required": ["type", "kind", "title", "statement", "quote", "source", "rationale", "strength", "owner"],
             "properties": {"type": {"type": "string", "enum": list(RECORD_OF)},
                            "kind": {"type": "string", "enum": KNOWLEDGE_KINDS + ["none"]},
+                           "rationale": {"type": "string"},
+                           "strength": {"type": "string", "enum": GUIDELINE_STRENGTH + ["none"]},
+                           "owner": {"type": "string", "enum": labels + ["none"]},
                            "title": {"type": "string"}, "statement": {"type": "string"},
                            "quote": {"type": "string"}, "source": {"type": "string", "enum": labels}}}
     return {"type": "object", "additionalProperties": False, "required": ["items"],
@@ -255,7 +268,7 @@ async def settle(t: Task, responses: Responses):
     def ask(prompt, name, schema, **kw):
         return responses.ask(t.id, prompt, name, schema, **kw)
 
-    if t.kind != "knowledge":
+    if t.kind not in EXTRACTS:
         return check(t, await ask(judge_prompt(t), f"ekg_{t.kind}", judge_schema(t.labels())))
     labels = [s.label for s in t.sources]
     ans = await ask(extract_prompt(t), "ekg_knowledge_extract", extract_schema(labels), max_tokens=1500)
@@ -270,7 +283,8 @@ async def settle(t: Task, responses: Responses):
         elif src is None or find_quote(x.get("quote"), [src]) is None:
             dropped["check: quote not in its source"] += 1
         else:
-            items.append({**x, "source_id": src.id})
+            owner = by_label.get(x.get("owner"))
+            items.append({**x, "source_id": src.id, "owner_id": owner.id if owner else None})
     if not items:
         return {"status": "rejected", "reason": "llm: nothing worth keeping" if not dropped else ", ".join(dropped), "dropped": dict(dropped)}
     verdicts = await ask(judge_items_prompt(t, items), "ekg_knowledge_judge", judge_items_schema(len(items)))
@@ -301,6 +315,13 @@ class Writer:
         self.old_records, self.old_links = set(self.g.records), set(self.g.links)
         self.patched, self.runs, self.model = set(), {}, model
         self.by_id = {r["id"]: r for r in records}
+        self.author, self.account_of = {}, {}  # a source -> its author; an email address -> its account
+        for lk in links:
+            if lk["type"] in ("AUTHORED_BY", "FROM", "CREATED_BY") and lk["props"].get("role") in (None, "author", "sender", "creator"):
+                self.author.setdefault(lk["a"], lk["b"])
+            if lk["type"] == "ADDRESS_OF":
+                self.account_of.setdefault(lk["a"], lk["b"])
+        self.people = collections.Counter()
 
     def run_of(self, kind):
         if kind not in self.runs:
@@ -328,7 +349,7 @@ class Writer:
         subj = self.by_id[t.subject]
         if "field" in t.write:
             return self._field(t, e, subj)
-        if t.kind == "knowledge":
+        if t.kind in EXTRACTS:
             return self._knowledge(t, e, subj)
         cand = next(c for c in t.candidates if c.label == e["choice"])
         spec = t.write["by_type"][cand.type] if "by_type" in t.write else t.write
@@ -359,9 +380,23 @@ class Writer:
                 if (why := self._link("MADE_IN", self.by_id[t.write["decision"]], src, [src["id"]], t.kind, at=at)):
                     problems.append(why)
                 continue
+            at = src["props"].get("sent_at") or src["props"].get("at")
             props = {text_field: x["statement"], "_stated": {text_field: {"value": x["statement"], "by": {src["id"]: {"value": x["quote"]}}}}}
             if rtype == "Knowledge":
                 props.update(kind=x["kind"] if x["kind"] in KNOWLEDGE_KINDS else "fact", title=x["title"], status="active")
+            elif rtype == "Decision":
+                props.update(status="accepted", decided_at=at, title=x.get("title") or None,
+                             rationale=(x.get("rationale") or "").strip() or None)
+            elif rtype == "Guideline":
+                props.update(status="active", title=x.get("title") or None,
+                             strength=x["strength"] if x.get("strength") in GUIDELINE_STRENGTH else "should")
+            elif rtype == "Requirement":
+                props.update(status="open", title=x.get("title") or None)
+            elif rtype == "Question":
+                props.update(asked_at=at)
+            elif rtype == "ActionItem":
+                props.update(status="open")
+            props = {k: v for k, v in props.items() if v is not None}
             native = "llm:" + hashlib.sha1(f"{src['id']}|{x['quote']}".encode()).hexdigest()[:16]
             key_before = set(self.g.records)
             rec = self.g.rec(rtype, "derived", native, props, scope=src["scope"], acl_from=src)
@@ -372,14 +407,37 @@ class Writer:
                 problems.append(f"schema: {res.errors[0]}")
                 continue
             self.by_id[rec["id"]] = rec
-            at = src["props"].get("sent_at") or src["props"].get("at")
             if (why := self._link(origin, rec, src, [src["id"]], t.kind, at=at)):  # its origin (R41)
                 problems.append(why)
                 del self.g.records[rec["props"]["_key"]]
                 continue
             if t.write.get("about"):
                 self._link("ABOUT", rec, self.by_id[t.write["about"]], [src["id"]], t.kind)
+            self._person(rec, src, x, t.kind, at)
         return "; ".join(problems) if problems and len(problems) == len(e["items"]) else None
+
+    def _person(self, rec, src, x, kind, at):
+        """Who said, decided, asked or took on the item: the author of its message (for an action item, of the
+        owner's message). A link that needs an Account follows an email address to its account, else is skipped."""
+        if rec["type"] == "ActionItem":
+            if not x.get("owner_id"):
+                return
+            ltype, own, who, at = "ASSIGNED_TO", {"valid_from": at}, self.author.get(x["owner_id"]), None
+        elif rec["type"] in PERSON_LINK:
+            (ltype, own), who = PERSON_LINK[rec["type"]], self.author.get(src["id"])
+        else:
+            return
+        if who is None:
+            self.people[f"{ltype}: source has no author"] += 1
+            return
+        target = self.by_id[who]
+        if not common._reg.link_allows(ltype, rec["type"], target["type"]) and who in self.account_of:
+            target = self.by_id[self.account_of[who]]
+        if not common._reg.link_allows(ltype, rec["type"], target["type"]):
+            self.people[f"{ltype}: author is a {target['type']}, the schema needs an Account"] += 1
+            return
+        why = self._link(ltype, rec, target, [src["id"]], kind, at=at, **own)
+        self.people[f"{ltype}: {'linked' if why is None else why}"] += 1
 
     def write(self, out: Path):
         recs = [r for k, r in self.g.records.items() if k not in self.old_records or k in self.patched]
@@ -390,7 +448,7 @@ class Writer:
         with open(out / "links.jsonl", "w", encoding="utf-8") as f:
             for lk in links:
                 f.write(json.dumps(lk, ensure_ascii=False) + "\n")
-        return {"records_new_or_patched": len(recs), "links_new": len(links),
+        return {"records_new_or_patched": len(recs), "links_new": len(links), "people_links": dict(self.people),
                 "links_by_type": dict(collections.Counter(lk["type"] for lk in links)),
                 "records_by_type": dict(collections.Counter(r["type"] for r in recs))}
 
@@ -431,7 +489,7 @@ def run(graph: Path, query_master: Path, out: Path | None = None, kinds=None, li
     report = {"graph": str(graph), "prompt_version": PROMPT_VERSION, "mode": mode, "kinds": {}}
     for k, (tasks, skipped) in built.items():
         report["kinds"][k] = {"to_ask": len(tasks), "no_candidate": dict(skipped),
-                              "prompt_chars_max": max((len(judge_prompt(t) if k != "knowledge" else extract_prompt(t)) for t in tasks), default=0)}
+                              "prompt_chars_max": max((len(judge_prompt(t) if k not in EXTRACTS else extract_prompt(t)) for t in tasks), default=0)}
 
     if mode == "dry":
         with open(out / "tasks.jsonl", "w", encoding="utf-8") as f:
@@ -443,7 +501,7 @@ def run(graph: Path, query_master: Path, out: Path | None = None, kinds=None, li
         with open(out / "prompts_sample.txt", "w", encoding="utf-8") as f:
             for k, (tasks, _) in built.items():
                 if tasks:
-                    f.write(f"===== {k} =====\n{judge_prompt(tasks[0]) if k != 'knowledge' else extract_prompt(tasks[0])}\n\n")
+                    f.write(f"===== {k} =====\n{judge_prompt(tasks[0]) if k not in EXTRACTS else extract_prompt(tasks[0])}\n\n")
         Path(out / "report.json").write_text(json.dumps(report, indent=1, ensure_ascii=False), encoding="utf-8")
         return report
 
@@ -457,7 +515,7 @@ def run(graph: Path, query_master: Path, out: Path | None = None, kinds=None, li
 
         async def go():
             for t in picks:
-                prompt = judge_prompt(t) if t.kind != "knowledge" else extract_prompt(t)
+                prompt = judge_prompt(t) if t.kind not in EXTRACTS else extract_prompt(t)
                 log(f"\n--- {t.kind}: {t.question}\n    prompt {len(prompt):,} chars, {len(t.candidates)} candidates")
                 e = await settle(t, responses)
                 log(f"    -> {json.dumps(e, ensure_ascii=False)[:600]}")

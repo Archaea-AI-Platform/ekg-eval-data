@@ -21,7 +21,8 @@ SECRET = "ekg-eval-secret"  # ids only need to be stable within one tenant's run
 
 # Which pillar a record belongs to, by the tool that produced it (for the cross-pillar counts).
 PILLAR_OF_TOOL = {"asf": "People", "email": "People", "jira": "Tickets", "linear": "Tickets", "github": "Code",
-                  "git": "Code", "mail": "Conversations", "slack": "Conversations", "confluence": "Documents",
+                  "git": "Code", "mail": "Conversations", "slack": "Conversations", "forum": "Conversations",
+                  "confluence": "Documents", "docs": "Documents",
                   "derived": "Knowledge", "ekg": "Access"}
 
 _reg = _ids = _vrec = _vlink = None

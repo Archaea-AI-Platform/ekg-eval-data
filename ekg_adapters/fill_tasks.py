@@ -11,7 +11,9 @@ counted with its reason, never asked.
   email_topic      mail thread linked to nothing     -> DISCUSSES email -> Ticket, MADE_IN Decision -> email
   identity         account with no person            -> HAS_ACCOUNT Person -> Account (inferred: names, grants nothing)
   decision_status  decision page with no status      -> Decision.status, cited to the page
-  knowledge        conversation                      -> Knowledge / Decision / ActionItem / Question records (extract, then judge)
+  knowledge        conversation (mail, chat, forum,  -> Knowledge / Decision / Guideline / Requirement / ActionItem / Question
+                   PR and ticket comments)              records (extract, then judge), with who said, asked, decided or took it on
+  doc_knowledge    stored documents, recent wiki      -> the same records, from one document's text
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ import unicodedata
 from dataclasses import dataclass, field
 
 TEXT_CAP = 1500        # characters of one subject source shown to the model
+DOC_TEXT_CAP = 9000    # a document, read whole (one source)
 CANDIDATE_CAP = 600    # characters of one candidate
 PROMPT_CAP = 14000     # everything together; under query-master's LLM_PROMPT_CHAR_BUDGET (20,000)
 MAX_CANDIDATES = 5
@@ -35,6 +38,7 @@ NO_TICKET = re.compile(r"^\s*\[?(minor|hotfix|trivial)\]?\b", re.I)  # the proje
 SHA = re.compile(r"\b[0-9a-f]{7,40}\b")
 PR_REF = re.compile(r"(?:/pull/|(?<![\w/])#)(\d{1,6})\b")
 DECISION_STATUS = ["proposed", "accepted", "superseded", "reversed", "reinstated", "disputed"]
+GUIDELINE_STRENGTH = ["must", "should", "avoid"]
 KNOWLEDGE_KINDS = ["how_to", "workaround", "gotcha", "norm", "folklore", "rationale", "tip", "warning", "fact"]
 
 
@@ -108,7 +112,7 @@ class View:
                       key=lambda c: c["props"].get("at") or "")
 
     def author(self, rid):
-        for r in self.ends(rid, {"AUTHORED_BY", "FROM"}, direction="out"):
+        for r in self.ends(rid, {"AUTHORED_BY", "FROM", "CREATED_BY"}, direction="out"):
             p = r["props"]
             return p.get("display_name") or p.get("login") or p.get("address") or "?"
         return "?"
@@ -277,7 +281,8 @@ def ticket_fix(v):
     tasks, skipped = [], collections.Counter()
     for t in v.typed("Ticket"):
         p = t["props"]
-        if not p.get("resolution") or p["resolution"].lower() in NOT_FIXED:
+        resolution = p.get("resolution") or ("Fixed" if p.get("kind") == "issue" and p.get("completed_at") else None)
+        if not resolution or resolution.lower() in NOT_FIXED:
             continue
         if v.ends(t["id"], {"IMPLEMENTS", "LINKS_TO"}, {"PullRequest", "Commit"}) or any(
                 v.ends(c["id"], {"LINKS_TO", "MENTIONS"}, {"PullRequest", "Commit"}, "out") for c in v.comments(t["id"])):
@@ -294,7 +299,7 @@ def ticket_fix(v):
             continue
         items = [(pr_item if v.rec[i]["type"] == "PullRequest" else commit_item)(v, v.rec[i], f"C{n + 1}")
                  for n, i in enumerate(cands[:MAX_CANDIDATES])]
-        tasks.append(Task("ticket_fix", t["id"], f"Ticket {p.get('identifier')} is resolved as {p['resolution']}. "
+        tasks.append(Task("ticket_fix", t["id"], f"Ticket {p.get('identifier')} is resolved as {resolution}. "
                           "Which pull request or commit, if any, made that fix?",
                           "the text shows that PR or commit is the change that fixed this ticket (a comment names it, "
                           "or it is plainly the same change). Same words alone is a reject.",
@@ -401,15 +406,27 @@ def decision_status(v):
     return tasks, skipped
 
 
+def _linked_work(v, msgs):
+    """The one ticket or PR a conversation is already linked to (by the adapters or the linker), else None."""
+    found = []
+    for m in msgs:
+        found += v.ends(m["id"], {"DISCUSSES", "ANNOUNCES", "MENTIONS", "LINKS_TO"}, {"Ticket", "PullRequest"}, "out")
+    ids = _ordered(r["id"] for r in found if not _stub(r))
+    return ids[0] if len(ids) == 1 else None
+
+
 def knowledge(v):
-    """Conversations worth reading: mail threads, PR conversations and ticket comment threads with real back-and-forth."""
+    """Conversations worth reading: mail threads, chat and forum threads, PR conversations and ticket comment
+    threads with real back-and-forth."""
     tasks, skipped = [], collections.Counter()
     by_key = {}  # existing decisions by the key their statement starts with (KIP-1340, FLIP-547, ...)
     for d in v.typed("Decision"):
-        if (m := re.match(r"([A-Z][A-Z0-9]*-\d+)\b", d["props"].get("statement") or "")):
+        if d["props"].get("identifier"):
+            by_key.setdefault(d["props"]["identifier"], d["id"])
+        elif (m := re.match(r"([A-Z][A-Z0-9]*-\d+)\b", d["props"].get("statement") or "")):
             by_key.setdefault(m.group(1), d["id"])
 
-    def add(subject, title, msgs):
+    def add(subject, title, msgs, about=None):
         msgs = [m for m in msgs if not v.is_bot(m["id"])][:MAX_SOURCES]
         if len(msgs) < 2 or sum(len(m["props"].get("text") or "") for m in msgs) < 600:
             skipped["too short to hold knowledge"] += 1
@@ -418,14 +435,23 @@ def knowledge(v):
                         _clip(m["props"].get("text"), TEXT_CAP), m["type"]) for i, m in enumerate(msgs)]
         named = _ordered(by_key[k] for k in re.findall(r"\b[A-Z][A-Z0-9]*-\d+\b", title) if k in by_key)
         tasks.append(Task("knowledge", subject["id"], title, "", sources, [],
-                          {"about": subject["id"] if subject["type"] in ("Ticket", "PullRequest") else None,
+                          {"about": subject["id"] if subject["type"] in ("Ticket", "PullRequest") else about,
                            # a decision taken here about an existing proposal is that proposal, not a new record
                            "decision": named[0] if len(named) == 1 else None}))
 
     for th in v.typed("EmailThread"):
         msgs = sorted(v.ends(th["id"], {"IN"}, {"EmailMessage"}, "in"), key=lambda m: m["props"].get("sent_at") or "")
         if msgs:
-            add(msgs[0], f"Mail thread: {th['props'].get('normalized_subject')}", msgs)
+            add(msgs[0], f"Mail thread: {th['props'].get('normalized_subject')}", msgs, _linked_work(v, msgs))
+    for th in v.typed("Thread"):  # chat threads (Slack) and forum topics (Discourse); review threads are PR comments
+        if th["props"].get("kind") not in ("chat", "discussion"):
+            continue
+        msgs = sorted(v.ends(th["id"], {"IN"}, {"Message", "Comment"}, "in"), key=lambda m: m["props"].get("at") or "")
+        tickets = [t["id"] for t in v.ends(th["id"], {"DISCUSSED_IN"}, {"Ticket"}, "in")]
+        if msgs:
+            label = "Forum topic" if th["props"]["kind"] == "discussion" else "Chat thread"
+            add(msgs[0], f"{label}: {th['props'].get('title') or (msgs[0]['props'].get('text') or '')[:80]}", msgs,
+                tickets[0] if len(tickets) == 1 else _linked_work(v, msgs))
     for pr in v.typed("PullRequest"):
         add(pr, f"Pull request #{pr['props'].get('number')}: {pr['props'].get('title')}", v.comments(pr["id"]))
     for t in v.typed("Ticket"):
@@ -433,5 +459,42 @@ def knowledge(v):
     return tasks, skipped
 
 
+DOC_RECENT_DAYS = 120  # wiki pages edited this close to the newest edit are read; older pages were read before
+
+
+def doc_knowledge(v):
+    """Documents: stored files (docs adapter) and wiki pages edited recently, read whole for guidelines,
+    decisions and how-tos. A document is one source, so the quote must be in its text."""
+    tasks, skipped = [], collections.Counter()
+    edits = {}
+    for d in v.typed("Document") + v.typed("File"):
+        cvs = [v.rec[lk["a"]] for lk in v.inn[d["id"]] if lk["type"] == "VERSION_OF"]
+        when = max((c["props"].get("valid_from") or "" for c in cvs), default="")
+        if cvs:
+            edits[d["id"]] = when
+    newest = max(edits.values(), default="")
+    cutoff = ""
+    if newest:
+        import datetime as _dt
+        cutoff = (_dt.datetime.strptime(newest[:10], "%Y-%m-%d") - _dt.timedelta(days=DOC_RECENT_DAYS)).strftime("%Y-%m-%d")
+    for did, when in edits.items():
+        d = v.rec[did]
+        p = d["props"]
+        is_stored = p["source_tool"] == "docs" or (d["type"] == "File" and p.get("kind") == "doc")
+        if d["type"] == "Document" and when and when[:10] < cutoff:
+            skipped["wiki page not edited recently"] += 1
+            continue
+        if d["type"] == "File" and not is_stored:
+            continue
+        text = v.description(did)
+        if len(text) < 600:
+            skipped["too short to hold knowledge"] += 1
+            continue
+        title = p.get("title") or p.get("name") or p.get("path")
+        src = Item("S1", did, f"{'Page' if d['type'] == 'Document' else 'Document'}: {title}", _clip(text, DOC_TEXT_CAP), d["type"])
+        tasks.append(Task("doc_knowledge", did, f"Document: {title}", "", [src], [], {"about": None, "decision": None}))
+    return tasks, skipped
+
+
 BUILDERS = {"pr_ticket": pr_ticket, "commit_pr": commit_pr, "ticket_fix": ticket_fix, "email_topic": email_topic,
-            "identity": identity, "decision_status": decision_status, "knowledge": knowledge}
+            "identity": identity, "decision_status": decision_status, "knowledge": knowledge, "doc_knowledge": doc_knowledge}

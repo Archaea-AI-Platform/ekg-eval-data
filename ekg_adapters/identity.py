@@ -24,6 +24,7 @@ VERIFIES_EMAIL = {"slack", "linear"}  # tools whose account email is confirmed b
 
 def resolve_identity(g: Graph):
     persons = g.ctx.setdefault("persons", {})          # key -> Person (directory uid, or "email:<address>")
+    had_directory = bool(persons)
     stats = collections.Counter()
     done_github = set()  # (person, GitHub account) pairs already linked
     tools_of = collections.defaultdict(set)
@@ -128,8 +129,13 @@ def resolve_identity(g: Graph):
             else:
                 stats[f"{tool}: unresolved (no directory match)"] += 1
 
+    # ---- step 7: no directory (public data): people inferred from commit and mail authorship
+    mode = g.ctx.get("settings", {}).get("infer_people", "auto")
+    if mode is True or (mode == "auto" and not had_directory):
+        _infer_people(g, persons, owner_of_addr, by_id, attach, stats, tools_of)
+
     linked = {kb for lk, _, kb in g.links.values() if lk["type"] == "HAS_ACCOUNT"}
-    for tool in ("github", "slack", "linear"):
+    for tool in ("github", "slack", "linear", "forum"):
         accts = [a for a in g.ctx.get(f"{tool}_accounts", {}).values() if not a["props"].get("is_bot")]
         if accts:
             stats[f"{tool}: unresolved (no person match)"] = sum(1 for a in accts if a["props"]["_key"] not in linked)
@@ -138,3 +144,72 @@ def resolve_identity(g: Graph):
     return {"links": dict(stats), "persons": len(persons),
             "persons_by_tool_count": {f"{k} tool{'s' if k != 1 else ''}": v for k, v in sorted(reach.items())},
             "persons_in_tool": dict(collections.Counter(t for ts in tools_of.values() for t in ts))}
+
+
+def _infer_people(g, persons, owner_of_addr, by_id, attach, stats, tools_of):
+    """People from who wrote what, for data with no directory: inferred links only, which name a person but
+    grant nothing. Addresses with the same full name (two words or more) are one person; any other address
+    is a person of its own. A GitHub account joins its person through its noreply address."""
+    used = {}  # address record id -> the tools it was used in
+    for lk, _, _ in g.links.values():
+        if lk["type"] in ("AUTHORED_BY", "FROM") and by_id[lk["b"]]["type"] == "EmailAddress":
+            used.setdefault(lk["b"], set()).add("git" if by_id[lk["a"]]["type"] == "Commit" else "mail")
+    names_account = collections.defaultdict(list)  # address -> the GitHub accounts it names (noreply)
+    for lk, _, _ in g.links.values():
+        if lk["type"] == "ADDRESS_OF" and by_id[lk["b"]]["props"].get("tool") == "github":
+            names_account[lk["a"]].append(by_id[lk["b"]])
+    groups = collections.defaultdict(list)
+    for aid in used:
+        a = by_id[aid]["props"]
+        if aid in owner_of_addr or a.get("kind") == "automation" or a["address"] in ("noreply@github.com",):
+            continue
+        name = " ".join((a.get("display_name") or "").split())
+        key = name.casefold() if len(name.split()) >= 2 else a["address"]
+        groups[key].append(aid)
+    for key, aids in groups.items():
+        addrs = [by_id[i] for i in aids]
+        plain = [x for x in addrs if "noreply" not in x["props"]["address"]] or addrs
+        name = next((x["props"].get("display_name") for x in addrs if x["props"].get("display_name")), None)
+        pkey = f"inferred:{key}"
+        persons[pkey] = g.rec("Person", "email", pkey, {"full_name": name, "work_email": plain[0]["props"]["address"],
+                              "status": "active", "person_source": "inferred_from_activity"}, plain[0]["scope"])
+        stats["person inferred from commit and mail authorship"] += 1
+        for x in addrs:
+            g.link("HAS_ALIAS", persons[pkey], x, "inferred", 0.6, link_method="inferred", verified=False)
+            owner_of_addr[x["id"]] = pkey
+            tools_of[pkey].update(used[x["id"]])
+        for aid in aids:  # the GitHub account a noreply address names
+            for acct in names_account.get(aid, ()):
+                attach(pkey, acct, "github", "noreply address of an inferred person", 0.7, evidence=[aid])
+    # accounts with nothing but a display name (forum, issue authors): only a unique full-name match
+    by_name = collections.defaultdict(set)
+    for k, p in persons.items():
+        if k.startswith("inferred:") and len((p["props"].get("full_name") or "").split()) >= 2:
+            by_name[p["props"]["full_name"].casefold()].add(k)
+    linked = {lk["b"] for lk, _, _ in g.links.values() if lk["type"] == "HAS_ACCOUNT"}
+    owner = {lk["b"]: lk["a"] for lk, _, _ in g.links.values() if lk["type"] == "HAS_ACCOUNT"}
+    key_of = {p["id"]: k for k, p in persons.items()}
+    for tool in ("forum", "github"):
+        for acct in g.ctx.get(f"{tool}_accounts", {}).values():
+            hits = by_name.get((acct["props"].get("display_name") or "").casefold(), set())
+            if acct["id"] not in linked and not acct["props"].get("is_bot") and len(hits) == 1:
+                attach(next(iter(hits)), acct, tool, "unique full name of an inferred person", 0.5)
+                linked.add(acct["id"])
+                owner[acct["id"]] = persons[next(iter(hits))]["id"]
+    # the same login on the forum and the code host (projects often ask for it): one person, when only
+    # one account of each tool has that login and the other account already has a person
+    logins = collections.defaultdict(list)
+    for tool in ("forum", "github"):
+        for acct in g.ctx.get(f"{tool}_accounts", {}).values():
+            if acct["props"].get("login") and not acct["props"].get("is_bot"):
+                logins[acct["props"]["login"].casefold()].append(acct)
+    for accts in logins.values():
+        if len(accts) != 2 or accts[0]["props"]["tool"] == accts[1]["props"]["tool"]:
+            continue
+        have = [a for a in accts if a["id"] in owner]
+        if len(have) == 1:
+            other = next(a for a in accts if a is not have[0])
+            pkey = key_of.get(owner[have[0]["id"]])
+            if pkey:
+                attach(pkey, other, other["props"]["tool"], "same login on the forum and the code host", 0.5,
+                       evidence=[have[0]["id"]])

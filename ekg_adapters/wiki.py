@@ -13,17 +13,21 @@ from pathlib import Path
 from .access import place
 from .common import Graph, J, ticket_rx, utc, xhtml_sections
 
-KIP_TITLE = re.compile(r"^KIP-(\d+)")
-STATE_RX = re.compile(r"Current\s+[Ss]tate\s*(?:</[^>]+>\s*)*:?\s*(?:<[^>]+>\s*)*([A-Za-z][A-Za-z \-]{2,30})")
+STATE_RX = re.compile(r"Current\s+[Ss]tate\s*(?:</[^>]+>\s*)*:?\s*(?:<[^>]+>\s*)*(?:&quot;|&ldquo;|&rdquo;|&#39;|[\"'“”])?\s*([A-Za-z][A-Za-z \-]{2,30})")
 KIP_STATUS = {"accepted": "accepted", "adopted": "accepted", "approved": "accepted", "implemented": "accepted",
               "completed": "accepted", "released": "accepted", "under": "proposed", "discussion": "proposed",
               "draft": "proposed", "voting": "proposed", "vote": "proposed", "in": "proposed", "wip": "proposed",
               "superseded": "superseded", "replaced": "superseded",
-              "discarded": None, "rejected": None, "abandoned": None, "withdrawn": None, "dormant": None}
+              "rejected": "rejected", "discarded": "withdrawn", "abandoned": "withdrawn", "withdrawn": "withdrawn",
+              "dormant": "proposed"}  # dormant: still open, nobody working on it
+DECISION_STATUSES = {"accepted", "proposed", "superseded", "rejected", "withdrawn"}
+KEY_TITLE = re.compile(r"\s*([A-Z][A-Z0-9]*-\d+)\s*[:\-\u2013\u2014]?\s*(.*)")
 MBOX_MSGID = re.compile(r"mod_mbox/[^\"']*?/(?:%3[Cc]|<)(.+?)(?:%3[Ee]|>)")
 
 
 def map_wiki(g: Graph, d: Path):
+    prefix = g.ctx["settings"].get("decision_prefix")  # a page titled <prefix>-n is a decision proposal
+    title_rx = re.compile(rf"^{re.escape(prefix)}-(\d+)") if prefix else None
     key_rx = ticket_rx(g)
     space_json = J(d / "wiki/space.json")
     scope, _ = place(g, "confluence", "space", space_json["key"])
@@ -81,7 +85,7 @@ def map_wiki(g: Graph, d: Path):
                 g.link("AUTHORED_BY", cm, who, "field", role="author", at=at)
 
         # knowledge: a KIP page is a decision record
-        m = KIP_TITLE.match(p["title"])
+        m = title_rx.match(p["title"]) if title_rx else None
         if m:
             _decision(g, p, doc, int(m.group(1)), key_rx, scope, decisions)
     g.ctx["confluence_accounts"] = accounts
@@ -124,9 +128,11 @@ def _decision(g, p, doc, kip, key_rx, scope, decisions):
     st = STATE_RX.search(body)
     word = st.group(1).strip().split()[0].lower() if st else None
     status = KIP_STATUS.get(word, "unmapped") if word else "unparsed"
-    g.notes[f"knowledge: KIP status -> {status if status else 'no schema value (rejected/discarded)'}"] += 1
+    g.notes[f"knowledge: KIP status -> {status}"] += 1
+    m = KEY_TITLE.match(p["title"])
     dec = g.rec("Decision", "derived", f"kip:{kip}", {"statement": p["title"],
-                "status": status if status in ("accepted", "proposed", "superseded") else None}, scope)
+                "identifier": m.group(1) if m else None, "title": (m.group(2) if m else p["title"]) or None,
+                "status": status if status in DECISION_STATUSES else None}, scope)
     decisions[kip] = dec
     # where it was made: the KIP page itself (written), and its discussion thread when the link names a message
     g.link("MADE_IN", dec, doc, "text_rule", 0.95, evidence=[doc], at=utc(p["history"]["createdDate"]))

@@ -1,0 +1,59 @@
+From MAILER-DAEMON Mon Sep  1 00:00:00 2026
+From: Bob Kumar <bob@example.org>
+Date: 2026-09-04T10:00:00Z
+Subject: [DISCUSS] RFC-0042 dynamic shapes
+Message-ID: <m1@tvm>
+
+I propose we adopt RFC-0042 for dynamic shapes in Relax. This also covers #101.
+
+From MAILER-DAEMON Mon Sep  1 00:00:00 2026
+From: Carol Zhang <carol@example.org>
+Date: 2026-09-05T10:00:00Z
+Subject: Re: [DISCUSS] RFC-0042 dynamic shapes
+Message-ID: <m2@tvm>
+In-Reply-To: <m1@tvm>
+
+> I propose we adopt RFC-0042
++1, and the TIR helper is in https://github.com/apache/tvm/pull/104
+
+From MAILER-DAEMON Mon Sep  1 00:00:00 2026
+From: Carol Zhang <carol@example.org>
+Date: 2026-09-05T10:00:00Z
+Subject: Re: [DISCUSS] RFC-0042 dynamic shapes
+Message-ID: <m2@tvm>
+In-Reply-To: <m1@tvm>
+
+> I propose we adopt RFC-0042
++1, and the TIR helper is in https://github.com/apache/tvm/pull/104
+
+From MAILER-DAEMON Mon Sep  1 00:00:00 2026
+From: Alice Dev <alice@example.org>
+Date: 2026-09-06T10:00:00Z
+Subject: Question about Relax passes
+
+Is there a guide for writing a new Relax pass?
+
+From MAILER-DAEMON Mon Sep  1 00:00:00 2026
+From: git@apache.org
+Date: 2026-09-20T12:00:00Z
+Subject: [PR] [Relax] Fix crash on dynamic shapes (#102)
+Message-ID: <n1@gh>
+
+bob-k opened a new pull request #102:
+URL: https://github.com/apache/tvm/pull/102
+
+From MAILER-DAEMON Mon Sep  1 00:00:00 2026
+From: git@apache.org
+Date: 2026-09-21T12:00:00Z
+Subject: [I] Something in another repo
+Message-ID: <n2@gh>
+
+URL: https://github.com/apache/tvm-ffi/issues/7
+
+From MAILER-DAEMON Mon Sep  1 00:00:00 2026
+From: builds@apache.org
+Date: 2026-09-21T13:00:00Z
+Subject: [CI] build failed: main #555
+Message-ID: <n3@ci>
+
+build failed

@@ -1,0 +1,4 @@
+{"sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "subject": "[Relax] Fix crash on dynamic shapes (#102)", "body": "Fixes #101\n\nSee RFC-0042 for the shape design.", "author": "Bob Kumar <bob@example.org>", "date": "2026-09-20T11:00:00Z", "files_changed": ["python/tvm/relax/pass.py", "docs/README.md"]}
+{"sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "subject": "[TIR] Add dynamic shape helper", "body": "Part of #99", "author": {"name": "Carol Zhang", "email": "carol@example.org", "date": "2026-09-22T11:00:00Z"}, "files_changed": [{"filename": "python/tvm/tir/shape.py", "status": "added"}]}
+{"subject": "row without a sha"}
+not json

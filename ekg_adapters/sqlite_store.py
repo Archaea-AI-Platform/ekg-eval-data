@@ -195,18 +195,38 @@ def _rows(path):
         return [json.loads(line) for line in f]
 
 
-def save(graph: Path, query_master: Path, db_path: Path | None = None, log=print):
-    """graph/records.jsonl + links.jsonl (adapters), overlaid with graph/llm/ (LLM stage) -> one SQLite file."""
+def save(graph, query_master: Path, db_path: Path | None = None, log=print):
+    """One graph folder, or several: each folder's records/links.jsonl (adapters), overlaid with its llm/
+    (LLM stage) -> one SQLite file.
+
+    Several folders make one combined graph. Record ids come from the tenant and the source's own key, so
+    the same person, address or ticket built from two downloads is one row, and a stub one download left for
+    an item outside its window is replaced by the real record from the download that has it: its links then
+    reach that record. A real record is never replaced by a stub."""
     reg = common.bind(query_master)
     from app.ekg import models
-    db_path = Path(db_path or graph / "graph.sqlite")
-    stages = {"adapters": (_rows(graph / "records.jsonl"), _rows(graph / "links.jsonl")),
-              "llm": (_rows(graph / "llm" / "records.jsonl"), _rows(graph / "llm" / "links.jsonl"))}
-    records, stage_of = {}, {}
-    for stage, (recs, _) in stages.items():
+    graphs = [Path(x) for x in (graph if isinstance(graph, (list, tuple)) else [graph])]
+    if db_path is None and len(graphs) > 1:
+        raise ValueError("several graphs need an explicit output file")
+    db_path = Path(db_path or graphs[0] / "graph.sqlite")
+    stages = {}
+    for gp in graphs:
+        name = gp.name if len(graphs) > 1 else ""
+        stages[f"{name}:adapters".lstrip(":")] = (_rows(gp / "records.jsonl"), _rows(gp / "links.jsonl"))
+        stages[f"{name}:llm".lstrip(":")] = (_rows(gp / "llm" / "records.jsonl"), _rows(gp / "llm" / "links.jsonl"))
+    records, stage_of, observed_of = {}, {}, {}
+    merged = collections.Counter()
+    for stage, (recs, lks) in stages.items():
+        when = next((lk["props"].get("observed_at") for lk in lks), None)
         for r in recs:  # a later stage's copy of a record (an LLM-filled field) replaces the adapter's
+            old = records.get(r["id"])
+            if old is not None and r["props"].get("_stub") and not old["props"].get("_stub"):
+                continue
+            if old is not None and stage.split(":")[0] != stage_of[r["id"]].split(":")[0]:
+                merged["stub replaced by the real record" if old["props"].get("_stub") else "in more than one graph"] += 1
             records[r["id"]] = r
             stage_of[r["id"]] = stage
+            observed_of[r["id"]] = when
     links, link_stage = {}, {}
     for stage, (_, lks) in stages.items():
         for lk in lks:
@@ -223,7 +243,7 @@ def save(graph: Path, query_master: Path, db_path: Path | None = None, log=print
         if not res.ok:
             report["invalid"][f"record {r['type']}: {res.errors[0][:100]}"] += 1
             continue
-        rec_rows.append(record_row(r, observed, reg.spec_sha256))
+        rec_rows.append(record_row(r, observed_of.get(rid) or observed, reg.spec_sha256))
         report["records"][stage_of[rid]] += 1
     stored = {row["id"]: row for row in rec_rows}
     link_rows = []
@@ -263,7 +283,8 @@ def save(graph: Path, query_master: Path, db_path: Path | None = None, log=print
                                       for lk in reg.links.values()])
         insert("ekg_records", rec_rows)
         insert("ekg_links", link_rows)
-        meta = {"graph": str(graph), "schema_version": reg.schema_version, "registry_sha256": reg.spec_sha256,
+        meta = {"graph": str(graphs[0]) if len(graphs) == 1 else json.dumps([str(x) for x in graphs]),
+                "records_merged_across_graphs": dict(merged), "schema_version": reg.schema_version, "registry_sha256": reg.spec_sha256,
                 "built_at": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "observed_at": observed,
                 "records_by_stage": dict(report["records"]), "links_by_stage": dict(report["links"]),
                 "invalid_skipped": dict(report["invalid"]), "indexes_skipped": skipped,
@@ -277,4 +298,5 @@ def save(graph: Path, query_master: Path, db_path: Path | None = None, log=print
         shutil.copyfileobj(src, dst, 1 << 20)
     return {"sqlite": str(db_path), "size_mb": round(db_path.stat().st_size / 1e6, 1),
             "gzip_mb": round(gz.stat().st_size / 1e6, 1), **{k: v for k, v in meta.items()
-            if k in ("records_by_stage", "links_by_stage", "invalid_skipped", "indexes_skipped")}}
+            if k in ("records_by_stage", "links_by_stage", "invalid_skipped", "indexes_skipped",
+                     "records_merged_across_graphs")}}
