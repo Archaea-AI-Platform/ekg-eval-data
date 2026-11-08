@@ -31,6 +31,7 @@ from .common import Graph, from_dt, ticket_rx
 GITBOX = re.compile(r"This is an automated email from the ASF dual-hosted git repository\.")
 GITBOX_REPO = re.compile(r"in repository https://gitbox\.apache\.org/repos/asf/([\w.-]+?)(?:\.git)?\s")
 GITBOX_COMMIT = re.compile(r"^commit ([0-9a-f]{40})\b", re.M)
+GITBOX_NEW = re.compile(r"^\s+new ([0-9a-f]{7,40}) ", re.M)
 JIRA_NOTICE = re.compile(r"^\[jira\] \[(\w+)\] \(([A-Z][A-Z0-9]+-\d+)\)")
 GH_URL = re.compile(r"https://github\.com/([\w.-]+/[\w.-]+)/(pull|issues)/(\d+)")
 GH_REF = re.compile(r"(?<![\w/&#])#(\d{1,6})\b")
@@ -186,10 +187,26 @@ def _one(g, m, folder, s, lists, messages, addresses, threads, decided, in_list,
         if not hit or hit.group(1).lower() != repo.split("/")[-1]:
             g.notes["mail: push notices for another repo, not linked"] += 1
             return
+        # full shas ("commit <sha>"), and the short ones a multi-commit push lists ("new <sha> subject")
         shas = list(dict.fromkeys(GITBOX_COMMIT.findall(body)))
+        known = g.ctx.get("commits", {})
+        for short in GITBOX_NEW.findall(body):
+            full = next((c for c in known if c.startswith(short)), None) if not any(x.startswith(short) for x in shas) else None
+            if full:
+                shas.append(full)
         for sha in shas:
             g.ref(msg, "MENTIONS", "Commit", sha, "integration", kind="sha", at=sent)
-        g.notes["mail: push notices (MENTIONS their commits)" if shas else "mail: push notices naming no commit"] += 1
+        g.notes["mail: push notices (MENTIONS their commits)" if shas else "mail: push notices whose commits are outside the download"] += 1
+        # what the pushed commits name: ticket keys and #n, as mentions (a notice discusses nothing)
+        for k in sorted(set(key_rx.findall(f"{subject}\n{body}"))):
+            g.ref(msg, "MENTIONS", "Ticket", k, "text_rule", 0.8, kind="key", at=sent)
+        if github_issues:
+            for num in sorted(set(GH_REF.findall(f"{subject}\n{body}")), key=int):
+                g.ref(msg, "MENTIONS", "GitHubRef", int(num), "text_rule", 0.7, kind="key", at=sent)
+        for r, what, num in sorted(set(GH_URL.findall(body))):
+            if r.lower() == repo:
+                g.ref(msg, "LINKS_TO", "PullRequest" if what == "pull" else "GitHubRef", int(num), "field", 0.95,
+                      kind="url", at=sent)
         return
     if tool == "jira":
         notice = JIRA_NOTICE.match(subject)
