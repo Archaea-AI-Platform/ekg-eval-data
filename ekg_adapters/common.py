@@ -26,17 +26,21 @@ PILLAR_OF_TOOL = {"asf": "People", "email": "People", "jira": "Tickets", "linear
                   "derived": "Knowledge", "ekg": "Access"}
 
 _reg = _ids = _vrec = _vlink = None
+_secrets = []  # (label, pattern) from query-master's validator (R10), for redaction
+PRIVATE_KEY_BLOCK = re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----[\s\S]*?"
+                               r"(?:-----END (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----|\Z)")
 
 
 def bind(query_master: Path):
     """Import the registry, id rules and validator from a query-master checkout."""
-    global _reg, _ids, _vrec, _vlink
+    global _reg, _ids, _vrec, _vlink, _secrets
     import sys
     sys.path.insert(0, str(Path(query_master).resolve()))
     from app.ekg.registry import get_registry
     from app.ekg.schema import ids
-    from app.ekg.schema.validate import validate_link, validate_record
+    from app.ekg.schema.validate import _SECRET_PATTERNS, validate_link, validate_record
     _reg, _ids, _vrec, _vlink = get_registry(), ids, validate_record, validate_link
+    _secrets = [(label, PRIVATE_KEY_BLOCK if label == "private key" else rx) for label, rx in _SECRET_PATTERNS]
     return _reg
 
 
@@ -139,6 +143,21 @@ def file_props(path):
     return {"path": path, "name": name, "language": EXT_LANG.get(ext), "kind": kind}
 
 
+def redact(value, hits):
+    """Secrets in text replaced by a marker (R10), so the record and its links are kept instead of refused."""
+    if isinstance(value, str):
+        for label, rx in _secrets:
+            value, n = rx.subn(f"[redacted {label}]", value)
+            if n:
+                hits[label] += n
+        return value
+    if isinstance(value, list):
+        return [redact(v, hits) for v in value]
+    if isinstance(value, dict):
+        return {k: redact(v, hits) for k, v in value.items()}
+    return value
+
+
 # ---------------------------------------------------------------- the graph
 
 class Graph:
@@ -154,7 +173,10 @@ class Graph:
     # ---- records
     def rec(self, rtype, tool, native, props, scope=None, acl_from=None):
         key = _ids.record_key(TENANT, tool, rtype, str(native))
-        clean = {k: v for k, v in props.items() if v is not None and v != [] and v != ""}
+        hits = collections.Counter()
+        clean = {k: redact(v, hits) for k, v in props.items() if v is not None and v != [] and v != ""}
+        for label, n in hits.items():
+            self.notes[f"secrets redacted in text (R10): {label}"] += n
         if key in self.records:
             r = self.records[key]
             for k, v in clean.items():  # a later, fuller sighting fills gaps; it never blanks a field
