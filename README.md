@@ -208,3 +208,17 @@ python -I ekg-eval-data/run_pipeline.py --data ekg-eval-raw/apache-kafka ekg-eva
 ```
 
 Record ids come from the tenant and each source's own key. Within one tenant (`apache` for every ASF download), the same person, address or ticket is one row, and a stub one download left for an item outside it is replaced by the real record from the other, so its links now reach it. A real record is never replaced by a stub. `_eval_meta` records the per-graph counts and `records_merged_across_graphs`. Saving needs SQLAlchemy, which is in query-master's venv (`query-master/.venv/Scripts/python.exe`).
+
+## Running other downloads (flink, iceberg-python, maka, ossie)
+
+`tools/shim_all.py` lays one of our own downloads (`<name>/raw` from the GitHub, Jira, git and mailing-list APIs, plus a `<name>/codebase` clone) out the way the adapters read it. It only links and regroups raw responses (one bundle per PR, `git/commits.jsonl` from the clone for the download's window); it parses nothing. `tools/ekg_run.py` runs, per dataset: layout, an inventory of every raw file and which adapter reads it, parse, LLM fill and the SQLite save. Each step is recorded in `state.json` and skipped once done, and the LLM step answers from `llm/responses.jsonl` first, so a stopped run resumes without paying twice. A failing dataset never stops the others.
+
+```bash
+export LLM_BACKEND=openrouter OPENROUTER_API_KEYS=<key> EKG_LLM_MODEL=mistralai/devstral-2512
+python ekg-eval-data/tools/ekg_run.py --llm dry flink iceberg-python maka ossie   # all but LLM calls
+python ekg-eval-data/tools/ekg_run.py --llm run flink iceberg-python maka ossie   # resumable
+```
+
+Output goes to `test_data_sorce_graph/ekg_runs/<name>/`; `EKG_OUR_DATA`, `EKG_DATA_CODE` and `EKG_QUERY_MASTER` point it at other folders or branches. The results are in ekg-eval-out, branch `fix/eval-datasets`.
+
+Fixed for these runs: output is byte-stable from run to run (sets iterated in sorted order); a project with no committee of its own (incubating) loads its committer roster; secrets in text are redacted instead of the record being refused (R10); ASF gitbox push notices are recognised by their body, MENTION their commits and what those commits name, and a notice for another repository on the same list stays unlinked; automated notices never become LLM tasks.
