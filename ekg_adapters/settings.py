@@ -26,6 +26,7 @@ DEFAULTS = {
         "jira@apache.org": "jira",               # "[jira] [Created] (KEY-1) ..." -> ANNOUNCES the ticket
         "git@apache.org": "github",              # "URL: https://github.com/<repo>/pull/N" -> ANNOUNCES the PR / issue
         "notifications@github.com": "github",
+        "github-bot@apache.org": "github",     # ASF's GitHub bridge: PR / issue notices and push notices
         "builds@apache.org": "ci",               # CI results: noise, counted and not linked
     },
     "ci_subject": r"^\[(GH|CI|BUILD)\]|workflow run|build (failed|fixed|is back)|\bjenkins\b",  # github notices that are CI

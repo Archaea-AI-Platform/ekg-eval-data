@@ -27,6 +27,10 @@ from pathlib import Path
 from .access import place
 from .common import Graph, from_dt, ticket_rx
 
+# ASF gitbox push notices come from the pusher's own address or github-bot@apache.org; the body says what they are
+GITBOX = re.compile(r"This is an automated email from the ASF dual-hosted git repository\.")
+GITBOX_REPO = re.compile(r"in repository https://gitbox\.apache\.org/repos/asf/([\w.-]+?)(?:\.git)?\s")
+GITBOX_COMMIT = re.compile(r"^commit ([0-9a-f]{40})\b", re.M)
 JIRA_NOTICE = re.compile(r"^\[jira\] \[(\w+)\] \(([A-Z][A-Z0-9]+-\d+)\)")
 GH_URL = re.compile(r"https://github\.com/([\w.-]+/[\w.-]+)/(pull|issues)/(\d+)")
 GH_REF = re.compile(r"(?<![\w/&#])#(\d{1,6})\b")
@@ -177,6 +181,16 @@ def _one(g, m, folder, s, lists, messages, addresses, threads, decided, in_list,
                valid_from=sent)
 
     # ---- notifications from integrations
+    if GITBOX.search(body[:400]):  # a push notice, whoever sent it
+        hit = GITBOX_REPO.search(body)
+        if not hit or hit.group(1).lower() != repo.split("/")[-1]:
+            g.notes["mail: push notices for another repo, not linked"] += 1
+            return
+        shas = list(dict.fromkeys(GITBOX_COMMIT.findall(body)))
+        for sha in shas:
+            g.ref(msg, "MENTIONS", "Commit", sha, "integration", kind="sha", at=sent)
+        g.notes["mail: push notices (MENTIONS their commits)" if shas else "mail: push notices naming no commit"] += 1
+        return
     if tool == "jira":
         notice = JIRA_NOTICE.match(subject)
         if notice:
