@@ -74,6 +74,9 @@ class Task:
         return [c.label for c in self.candidates]
 
 
+AUTOMATED_TEXT = re.compile(r"\s*This is an automated email from the ASF dual-hosted git repository\.")
+
+
 class View:
     """Read-only lookups over the written graph."""
 
@@ -118,6 +121,9 @@ class View:
         return "?"
 
     def is_bot(self, rid):
+        """Written by a bot, or an automated notice whatever its sender (an ASF push notice comes from the pusher)."""
+        if AUTOMATED_TEXT.match(self.rec[rid]["props"].get("text") or ""):
+            return True
         for r in self.ends(rid, {"AUTHORED_BY", "FROM"}, direction="out"):
             p = r["props"]
             if p.get("is_bot") or p.get("kind") == "automation" or (p.get("login") or "").endswith("[bot]"):
@@ -316,7 +322,8 @@ def email_topic(v):
         msgs = sorted(v.ends(th["id"], {"IN"}, {"EmailMessage"}, "in"), key=lambda m: m["props"].get("sent_at") or "")
         if not msgs or all(v.is_bot(m["id"]) for m in msgs):
             continue
-        if any(v.ends(m["id"], {"DISCUSSES", "ANNOUNCES", "MENTIONS", "MADE_IN"}, {"Ticket", "Decision", "PullRequest"}) for m in msgs):
+        if any(v.ends(m["id"], {"DISCUSSES", "ANNOUNCES", "MENTIONS", "MADE_IN"}, {"Ticket", "Decision", "PullRequest", "Commit"})
+               for m in msgs):
             continue
         human = [m for m in msgs if not v.is_bot(m["id"])][:3]
         sources = [Item(f"S{i + 1}", m["id"], f"Email from {v.author(m['id'])}: {m['props'].get('subject')}",
