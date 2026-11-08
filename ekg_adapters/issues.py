@@ -137,7 +137,7 @@ def map_issues(g: Graph, d: Path):
 
 
 def _refs(g, rec, text, own, at, repo_name):
-    for r, what, n in set(GH_URL.findall(text)):
+    for r, what, n in sorted(set(GH_URL.findall(text))):
         if r.lower() == repo_name.lower() and int(n) != own:
             g.ref(rec, "LINKS_TO", "PullRequest" if what == "pull" else "GitHubRef", int(n), "field", 0.95, kind="url", at=at)
     for n in {int(x) for x in GH_REF.findall(text)} - {own}:

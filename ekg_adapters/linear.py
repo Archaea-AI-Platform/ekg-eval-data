@@ -161,7 +161,7 @@ def map_linear(g: Graph, d: Path):
             ltype, kind = RELATION.get(rel["type"], ("RELATED_TO", rel["type"]))
             g.ref(t, ltype, "Ticket", rel["relatedIssue"]["identifier"], "field", stub=True, kind=kind,
                   valid_from=utc(rel.get("createdAt")))
-        for k in set(key_rx.findall(i.get("description") or "")) - {i["identifier"]}:
+        for k in sorted(set(key_rx.findall(i.get("description") or "")) - {i["identifier"]}):
             g.ref(t, "MENTIONS", "Ticket", k, "text_rule", 0.8, kind="key", at=created)
 
     # ---- documents
@@ -271,7 +271,7 @@ def _comments(g, t, i, acct, scope, key_rx):
         for repo, num in PR_URL.findall(c["body"] or ""):
             if repo.lower() == g.ctx.get("repo_name", "").lower():
                 g.ref(cm, "LINKS_TO", "PullRequest", int(num), "field", 0.95, stub=True, kind="url", at=at)
-        for k in set(key_rx.findall(c["body"] or "")) - {i["identifier"]}:
+        for k in sorted(set(key_rx.findall(c["body"] or "")) - {i["identifier"]}):
             g.ref(cm, "MENTIONS", "Ticket", k, "text_rule", 0.8, kind="key", at=at)
 
 

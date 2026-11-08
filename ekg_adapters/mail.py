@@ -206,7 +206,7 @@ def _one(g, m, folder, s, lists, messages, addresses, threads, decided, in_list,
     quoted = "\n".join(line for line in body.splitlines() if not line.lstrip().startswith(">"))  # not the quoted reply
     for k in sorted(set(key_rx.findall(quoted)) - subject_keys):
         g.ref(msg, "MENTIONS", "Ticket", k, "text_rule", 0.8, kind="key", at=sent)
-    for r, what, num in set(GH_URL.findall(quoted)):
+    for r, what, num in sorted(set(GH_URL.findall(quoted))):
         if r.lower() == repo:
             g.ref(msg, "LINKS_TO", "PullRequest" if what == "pull" else "GitHubRef", int(num), "field", 0.95,
                   kind="url", at=sent)

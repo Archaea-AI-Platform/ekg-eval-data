@@ -103,7 +103,7 @@ def map_github(g: Graph, d: Path, repo_name: str):
             g.ref(pr, "IMPLEMENTS", "TicketByBranch", p["head"]["ref"], "convention", 0.9, valid_from=created,
                   link_method="branch_name", closes_on_merge=True)
         if decision_rx:
-            for n in set(decision_rx.findall(p["title"])):
+            for n in sorted(set(decision_rx.findall(p["title"]))):
                 g.ref(pr, "ENACTS", "Decision", int(n), "convention", 0.9, valid_from=created)
         if g.ctx["settings"].get("issue_tracker") == "github":  # "Fixes #12" in the description closes that issue
             for n in sorted({int(x) for _, x in CLOSES.findall(p.get("body") or "")} - {p["number"]}):

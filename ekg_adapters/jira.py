@@ -137,7 +137,7 @@ def map_jira(g: Graph, d: Path, project_key: str, repo: str):
                         if m:
                             g.ref(t, "LINKS_TO", "PullRequest", int(m.group(1) or m.group(2)), "integration",
                                   stub=True, kind="url", at=utc(h["created"]))
-            for n in set(KIP.findall(f"{f['summary']} {f.get('description') or ''}")):
+            for n in sorted(set(KIP.findall(f"{f['summary']} {f.get('description') or ''}"))):
                 g.ref(t, "ABOUT", "Decision", int(n), "text_rule", 0.8, reverse=True)
 
             # ---- comments
@@ -148,7 +148,7 @@ def map_jira(g: Graph, d: Path, project_key: str, repo: str):
                 g.link("ON", cm, t, "field", at=at)
                 if c.get("author"):
                     g.link("AUTHORED_BY", cm, account(c["author"]), "field", role="author", at=at)
-                for n in set(pr_url.findall(c["body"] or "")):
+                for n in sorted(set(pr_url.findall(c["body"] or ""))):
                     g.ref(cm, "LINKS_TO", "PullRequest", int(n), "field", 0.95, stub=True, kind="url", at=at)
     g.ctx["jira_accounts"] = accounts
 

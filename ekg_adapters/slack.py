@@ -215,9 +215,9 @@ def _message(g, chan, cid, m, at, scope, account, names, key_rx):
             g.link("CREATED_BY", fr, account(f["user"]), "field", role="uploader", how="upload", at=ts_utc(f.get("created")))
     # references: people, channels, links, ticket keys; integration bots announce instead of mention
     notifier = _notifier(author, bot)
-    for uid in set(USER.findall(raw)):
+    for uid in sorted(set(USER.findall(raw))):
         g.link("MENTIONS", msg, account(uid), "field", kind="mention", at=at)
-    for other, _ in set(CHANNEL.findall(raw)):
+    for other, _ in sorted(set(CHANNEL.findall(raw))):
         g.ref(msg, "MENTIONS", "Channel", other, "field", kind="channel", at=at)
     url_keys = set()
     for url, _ in LINK.findall(raw):
@@ -231,7 +231,7 @@ def _message(g, chan, cid, m, at, scope, account, names, key_rx):
             url_keys.add(key)
             g.ref(msg, "ANNOUNCES" if notifier else "LINKS_TO", "Ticket", key, "integration" if notifier else "field",
                   0.95, stub=True, kind="notify" if notifier else "url", at=at)
-    for key in set(key_rx.findall(text)) - url_keys:
+    for key in sorted(set(key_rx.findall(text)) - url_keys):
         if notifier:
             g.ref(msg, "ANNOUNCES", "Ticket", key, "integration", stub=True, kind="notify", at=at)
         else:

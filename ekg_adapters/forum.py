@@ -78,7 +78,7 @@ def map_forum(g: Graph, d: Path):
                 g.link("REPLY_TO", cm, parent, "field")
             for k in sorted(set(key_rx.findall(text))):
                 g.ref(cm, "MENTIONS", "Ticket", k, "text_rule", 0.8, kind="key", at=at)
-            for r, what, n in set(GH_URL.findall(post.get("cooked") or text)):
+            for r, what, n in sorted(set(GH_URL.findall(post.get("cooked") or text))):
                 if r.lower() == repo:
                     g.ref(cm, "LINKS_TO", "PullRequest" if what == "pull" else "GitHubRef", int(n), "field", 0.95,
                           kind="url", at=at)

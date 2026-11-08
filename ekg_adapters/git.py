@@ -160,7 +160,7 @@ def map_git(g: Graph, d: Path):
             g.ref(commit, "IMPLEMENTS", "Ticket", k, "convention", 0.9, stub=True, valid_from=committed,
                   link_method="commit_message")
         if decision_rx:
-            for num in set(decision_rx.findall(subject)):
+            for num in sorted(set(decision_rx.findall(subject))):
                 g.ref(commit, "ENACTS", "Decision", int(num), "convention", 0.9, valid_from=committed)
         if github_issues:  # GitHub issues: "Fixes #12" closes it; another #n names an issue or a PR
             closing = {int(n) for _, n in CLOSES.findall(c["message"])}
