@@ -13,14 +13,21 @@ from .common import Graph, J, day, ldap_time
 
 def map_people(g: Graph, d: Path, project: str):
     people = J(d / "people/public_ldap_people.json")["people"]
-    committee = J(d / "people/committee-info.json")["committees"][project]
+    # a project with no committee of its own (an incubating podling, governed by the Incubator PMC) still has
+    # its committer roster: load that, and leave the PMC and its chair out
+    committee = J(d / "people/committee-info.json")["committees"].get(project)
     ldap = J(d / "people/public_ldap_projects.json")["projects"][project]
     scope, _ = place(g, "asf", "org_directory", "apache")
 
-    pmc = g.rec("Group", "asf", f"pmc:{project}", {"name": f"{committee.get('display_name', project)} PMC",
-                "kind": "pmc"}, scope)
+    if committee:
+        pmc = g.rec("Group", "asf", f"pmc:{project}", {"name": f"{committee.get('display_name', project)} PMC",
+                    "kind": "pmc"}, scope)
     committers = g.rec("Group", "asf", f"committers:{project}", {"name": f"{project} committers", "kind": "committers"}, scope)
-    chair = g.rec("Position", "asf", f"chair:{project}", {"name": f"{project} PMC chair", "kind": "chair", "status": "filled"}, scope)
+    if committee:
+        chair = g.rec("Position", "asf", f"chair:{project}", {"name": f"{project} PMC chair", "kind": "chair", "status": "filled"}, scope)
+    else:
+        committee = {"roster": {}}
+        g.notes["people: no committee for the project (incubating?): committer roster only, no PMC or chair"] += 1
 
     persons, accounts = {}, {}
     for uid in sorted(set(ldap["members"]) | set(ldap["owners"]) | set(committee["roster"])):
