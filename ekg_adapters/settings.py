@@ -106,7 +106,7 @@ def _sample_rows(path: Path, n=50):
     text = path.read_text(encoding="utf-8")
     if path.suffix == ".jsonl":  # a bad line is skipped by the adapter, so it is counted, not fatal
         rows, bad = [], 0
-        for line in text.splitlines():
+        for line in text.split(chr(10)):  # not splitlines(): a commit message may hold U+2028
             if line.strip():
                 try:
                     rows.append(json.loads(line))

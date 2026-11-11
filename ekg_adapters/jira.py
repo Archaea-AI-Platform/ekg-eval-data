@@ -141,7 +141,7 @@ def map_jira(g: Graph, d: Path, project_key: str, repo: str):
                 g.ref(t, "ABOUT", "Decision", int(n), "text_rule", 0.8, reverse=True)
 
             # ---- comments
-            for c in f["comment"]["comments"]:
+            for c in (f.get("comment") or {}).get("comments", []):
                 at = utc(c["created"])
                 cm = g.rec("Comment", "jira", c["id"], {"text": jira_text(c["body"]), "kind": "ticket", "at": at,
                            "edited_at": utc(c["updated"]) if c["updated"] != c["created"] else None}, scope, acl_from=t)

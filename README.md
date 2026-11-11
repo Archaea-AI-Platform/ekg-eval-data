@@ -208,3 +208,67 @@ python -I ekg-eval-data/run_pipeline.py --data ekg-eval-raw/apache-kafka ekg-eva
 ```
 
 Record ids come from the tenant and each source's own key. Within one tenant (`apache` for every ASF download), the same person, address or ticket is one row, and a stub one download left for an item outside it is replaced by the real record from the other, so its links now reach it. A real record is never replaced by a stub. `_eval_meta` records the per-graph counts and `records_merged_across_graphs`. Saving needs SQLAlchemy, which is in query-master's venv (`query-master/.venv/Scripts/python.exe`).
+
+## Asking the graph: tools and evaluation
+
+query-master's `app/ekg/query/` reads a built graph through a per-person view and gives an LLM tools over it
+(the spec's 10 core tools and 10 extras, plus `overview`, `experts`, `discussions` and `schema`). These
+scripts use it; run them with query-master's venv python.
+
+```bash
+export LLM_BACKEND=openrouter OPENROUTER_API_KEYS=<key> EKG_LLM_MODEL=mistralai/devstral-2512
+PY=query-master/.venv/Scripts/python.exe
+$PY -I ekg-eval-data/ask_graph.py --list-tools
+$PY -I ekg-eval-data/ask_graph.py --tool overview --args '{"id": "KAFKA-20901"}'        # one tool, no LLM
+$PY -I ekg-eval-data/ask_graph.py "Which PR fixed KAFKA-20901 and who approved it?"     # the agent
+$PY -I ekg-eval-data/ask_graph.py --as "David Jacot" "What is David working on?"          # as one person
+$PY -I ekg-eval-data/make_eval_set.py      # questions + gold answers from the graph -> eval/kafka_questions.json
+$PY -I ekg-eval-data/run_eval.py           # ask them all, score -> eval/results/{results.jsonl,summary.json}
+```
+
+`make_eval_set.py` works the gold answers out from the stored records and links directly, not through the tools,
+in 11 categories: ticket → fixing PR and approver, PR → ticket, commit → PR and author, ticket status and
+assignee, state at a past date, KIP status and its thread, top contributor under a directory, counts, a person's
+accounts, decisions and rules about a ticket, and questions whose right answer is "nothing". `run_eval.py` keeps
+each answer with every tool call, so a failure can be read step by step. A hand-written set (the ACME questions,
+once their data is in this layout) uses the same file shape: `{"graph": ..., "as_of": ..., "questions": [{"id",
+"category", "question", "asker", "gold": {"must": [[...]], "none": false}}]}`.
+
+The same tools are on query-master's internal endpoints (service token): `GET /api/v1/ekg/internal/query/tools`,
+`POST .../query/tool {tool, args, asker}`, `POST .../query/ask {question, asker}`, with the graph from
+`EKG_GRAPH_SQLITE` (e.g. `ekg-eval-out/apache-kafka/graph.sqlite`).
+
+## Combined Kafka data and the shared query set
+
+`merge_extra.py` merges an extra-data drop (`kafka-eval-shared/extra-data`) into the download, in its own
+layout, without replacing anything (`<raw>/extra/merge_report.json` lists every decision):
+
+```bash
+python -I ekg-eval-data/merge_extra.py --extra <kafka-eval-shared>/extra-data --raw ekg-eval-raw/apache-kafka --full-git
+```
+
+For Kafka it added mail from 2023-01 to 2026-06 and 2026-11 (47 monthly archives), 592 PRs (7 with full
+detail, 585 known only from search hits, which the GitHub adapter loads as partial PRs), job lists for 41 CI
+runs (Check records), 254 Jira tickets that were stubs before, 1,715 more Confluence page versions, the whole
+git history of HEAD (18,544 commits, from `git/repo.git`; older commits without rename detection) and the file
+tree at HEAD (7,642 files). Rosters, board minutes, remote tags and fixVersion totals are kept under `extra/`;
+no adapter reads them yet. It reads the blobless `repo.git` with lazy fetch and automatic gc turned off.
+
+The shared query set is `eval/kafka_shared_queries.jsonl` (119 questions, from `2_trimmed.jsonl`). Each has
+a gold answer, acceptable variants, a checklist of required facts, phrases it must not say, and grading
+`script` (a variant must appear) or `judge` (an LLM judge checks the checklist); `eval_grading.py` does both.
+Every question is asked as of its own date.
+
+```bash
+$PY -I ekg-eval-data/run_eval.py --questions ekg-eval-data/eval/kafka_shared_queries.jsonl          # in process
+QUERY_MASTER_SERVICE_TOKEN=<token> $PY -I ekg-eval-data/run_eval.py --questions ... --api http://127.0.0.1:7111
+$PY -I ekg-eval-data/run_eval.py --questions ... --api http://127.0.0.1:7111 --user-token <web app token>
+$PY -I ekg-eval-data/demo_app.py [--api http://127.0.0.1:7111]      # http://127.0.0.1:8765
+python -I ekg-eval-data/test_eval_grading.py
+```
+
+With `--api`, questions go to query-master's graph agent over HTTP (its streamed search endpoint, on its own
+store), the way the web app asks. The graph gets into query-master's store with
+`python -m app.ekg.query.load --sqlite <graph.sqlite>` (see query-master's `app/ekg/README.md`).
+`demo_app.py` shows the question set with the last run's answers and grades, and runs any question live,
+tool call by tool call.

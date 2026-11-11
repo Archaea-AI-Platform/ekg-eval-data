@@ -1,0 +1,41 @@
+{
+ "questions": 30,
+ "passed": 30,
+ "by_category": {
+  "commit_to_pr": "3/3",
+  "count": "2/2",
+  "kip_status": "3/3",
+  "knowledge_about": "3/3",
+  "none_expected": "1/1",
+  "person_accounts": "3/3",
+  "pr_to_ticket": "3/3",
+  "state_as_of": "3/3",
+  "ticket_status": "3/3",
+  "ticket_to_fix": "3/3",
+  "top_contributor": "3/3"
+ },
+ "tool_calls_per_question": 2.6,
+ "tools_used": {
+  "links": 18,
+  "overview": 14,
+  "resolve": 12,
+  "get": 8,
+  "count": 6,
+  "find": 6,
+  "experts": 4,
+  "history": 3,
+  "person": 3,
+  "why": 3,
+  "search": 1
+ },
+ "tokens": {
+  "prompt_tokens": 501742,
+  "completion_tokens": 5210
+ },
+ "stopped": {
+  "answered": 30
+ },
+ "model": "mistralai/devstral-2512",
+ "graph": "C:\\Users\\Kanthamai 4\\Desktop\\Archaea Beta mamata local\\ekg-eval-out\\apache-kafka\\graph.sqlite",
+ "as_of": "2026-11-04T15:47:27Z"
+}

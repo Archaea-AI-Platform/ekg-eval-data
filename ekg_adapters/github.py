@@ -73,15 +73,22 @@ def map_github(g: Graph, d: Path, repo_name: str):
     for path in sorted((d / "github/pulls").glob("pr-*.json")):
         x = J(path)
         p = x["pull"]
-        created, merged, closed = utc(p["created_at"]), utc(p["merged_at"]), utc(p["closed_at"])
-        state = "merged" if merged else ("draft" if p["draft"] and p["state"] == "open" else p["state"])
+        # a PR known only from a search hit ("_partial"): no branches, files, reviews or commits
+        if x.get("_partial"):
+            g.notes[f"github: PRs known only from a {x['_partial']} hit (no branches, files or reviews)"] += 1
+        base, head = p.get("base") or {}, p.get("head") or {}
+        created, merged, closed = utc(p["created_at"]), utc(p.get("merged_at")), utc(p.get("closed_at"))
+        draft = bool(p.get("draft"))
+        state = "merged" if merged else ("draft" if draft and p["state"] == "open" else p["state"])
         pr = g.rec("PullRequest", "github", p["id"], {"number": p["number"], "title": p["title"], "state": state,
-                   "is_draft": p["draft"], "created_at": created, "merged_at": merged, "closed_at": closed,
-                   "base_ref": p["base"]["ref"], "head_ref": p["head"]["ref"]}, scope, acl_from=repo)
+                   "is_draft": draft, "created_at": created, "merged_at": merged, "closed_at": closed,
+                   "base_ref": base.get("ref"), "head_ref": head.get("ref")}, scope, acl_from=repo)
         prs[p["number"]] = pr
         g.link("IN", pr, repo, "field", valid_from=created)
-        g.link("BASE", pr, branch(p["base"]["ref"]), "field", valid_from=created)
-        g.link("HEAD", pr, branch(p["head"]["label"]), "field", valid_from=created)  # owner:branch, so forks stay apart
+        if base.get("ref"):
+            g.link("BASE", pr, branch(base["ref"]), "field", valid_from=created)
+        if head.get("label"):
+            g.link("HEAD", pr, branch(head["label"]), "field", valid_from=created)  # owner:branch, so forks stay apart
         g.link("AUTHORED_BY", pr, account(p["user"]), "field", role="author", at=created)
         if p.get("merged_by"):
             g.link("MERGED_BY", pr, account(p["merged_by"]), "field", at=merged)
@@ -95,12 +102,12 @@ def map_github(g: Graph, d: Path, repo_name: str):
         for k in sorted(title_keys):
             g.ref(pr, "IMPLEMENTS", "Ticket", k, "convention", 0.9, stub=True, valid_from=created, link_method="pr_title",
                   closes_on_merge=False)
-        for k in sorted(set(key_rx.findall(p["head"]["ref"].upper().replace("_", "-"))) - title_keys):
+        for k in sorted(set(key_rx.findall((head.get("ref") or "").upper().replace("_", "-"))) - title_keys):
             g.ref(pr, "IMPLEMENTS", "Ticket", k, "convention", 0.85, valid_from=created, link_method="branch_name",
                   closes_on_merge=False)
         # a tracker that names branches after the issue (Linear's branchName) links the PR by its head branch
-        if g.ctx.get("ticket_by_branch"):
-            g.ref(pr, "IMPLEMENTS", "TicketByBranch", p["head"]["ref"], "convention", 0.9, valid_from=created,
+        if g.ctx.get("ticket_by_branch") and head.get("ref"):
+            g.ref(pr, "IMPLEMENTS", "TicketByBranch", head["ref"], "convention", 0.9, valid_from=created,
                   link_method="branch_name", closes_on_merge=True)
         if decision_rx:
             for n in set(decision_rx.findall(p["title"])):
@@ -111,7 +118,7 @@ def map_github(g: Graph, d: Path, repo_name: str):
                       link_method="closing_keyword", magic_word=True, closes_on_merge=True)
 
         # files changed
-        for fch in x["files"]:
+        for fch in x.get("files") or []:
             fpath = fch["filename"]
             if fpath not in files:
                 files[fpath] = g.rec("File", "git", f"{repo_json['id']}:{fpath}", file_props(fpath), scope, acl_from=repo)
@@ -120,13 +127,13 @@ def map_github(g: Graph, d: Path, repo_name: str):
                    additions=fch.get("additions"), deletions=fch.get("deletions"), previous_filename=fch.get("previous_filename"))
 
         # timeline: labels (dated), review requests (dated)
-        timeline = x["timeline"]
+        timeline = x.get("timeline") or []
         _labels(g, pr, timeline, p, label, created)
-        _review_requests(g, pr, timeline, x["reviews"], account, merged or closed)
+        _review_requests(g, pr, timeline, x.get("reviews") or [], account, merged or closed)
 
         # reviews and approvals
-        commit_times = sorted(utc(c["commit"]["committer"]["date"]) for c in x["commits"])
-        for rv in x["reviews"]:
+        commit_times = sorted(utc(c["commit"]["committer"]["date"]) for c in x.get("commits") or [])
+        for rv in x.get("reviews") or []:
             if not rv.get("submitted_at"):
                 continue
             at = utc(rv["submitted_at"])
@@ -143,7 +150,7 @@ def map_github(g: Graph, d: Path, repo_name: str):
 
         # review threads and comments
         threads = {}
-        for c in x["review_comments"]:
+        for c in x.get("review_comments") or []:
             root = c.get("in_reply_to_id") or c["id"]
             at = utc(c["created_at"])
             if root not in threads:
@@ -157,7 +164,7 @@ def map_github(g: Graph, d: Path, repo_name: str):
             g.link("AUTHORED_BY", cm, account(c["user"]), "field", role="author", at=at)
             if fp := files.get(c["path"]):
                 g.link("ON", cm, fp, "field", at=at, line=c.get("line"), side=c.get("side"), at_commit=c["commit_id"])
-        for c in x["issue_comments"]:
+        for c in x.get("issue_comments") or []:
             at = utc(c["created_at"])
             cm = g.rec("Comment", "github", c["id"], {"text": c["body"], "kind": "conversation", "at": at}, scope, acl_from=pr)
             g.link("ON", cm, pr, "field", at=at)
@@ -165,7 +172,7 @@ def map_github(g: Graph, d: Path, repo_name: str):
             if c["user"]["type"] == "Bot":
                 g.notes["github: bot comments (CI notices, kept but marked by the bot author)"] += 1
         # the PR's own commits (head commits, mostly not on trunk): referenced by sha for the linker
-        for pos, c in enumerate(x["commits"]):
+        for pos, c in enumerate(x.get("commits") or []):
             g.ref(pr, "CONTAINS", "Commit", c["sha"], "field", position=pos, valid_from=created)
 
     _ci(g, d, repo, scope, account)
@@ -206,8 +213,9 @@ def _ci(g, d, repo, scope, account):
     for w in J(d / "github/workflows.json").get("workflows", []):
         pipelines[w["id"]] = g.rec("Pipeline", "github", w["id"], {"name": w["name"], "path": w["path"], "state": w["state"]},
                                    scope, acl_from=repo)
+    runs = {}
     for r in J(d / "github/workflow_runs.json") if (d / "github/workflow_runs.json").exists() else []:
-        run = g.rec("PipelineRun", "github", r["id"], {"name": r["name"], "event": r["event"], "conclusion": r["conclusion"],
+        run = runs[r["id"]] = g.rec("PipelineRun", "github", r["id"], {"name": r["name"], "event": r["event"], "conclusion": r["conclusion"],
                     "started_at": utc(r.get("run_started_at") or r["created_at"]), "head_sha": r["head_sha"],
                     "attempt": r.get("run_attempt")}, scope, acl_from=repo)
         if r["workflow_id"] in pipelines:
@@ -216,7 +224,30 @@ def _ci(g, d, repo, scope, account):
             g.link("ACTED_BY", run, account(r["actor"]), "field", role="initiator", action="start",
                    at=utc(r.get("run_started_at") or r["created_at"]))
         g.ref(run, "POINTS_TO", "Commit", r["head_sha"], "field")
-    g.notes["github: CI runs without job detail (no Check records yet)"] = len(J(d / "github/workflow_runs.json")) if (d / "github/workflow_runs.json").exists() else 0
+    with_jobs = 0
+    for f in sorted((d / "github/run_jobs").glob("*.json")) if (d / "github/run_jobs").is_dir() else []:
+        jobs = J(f).get("jobs") or []
+        if not jobs:
+            continue
+        with_jobs += 1
+        run = runs.get(jobs[0]["run_id"])
+        if run is None:  # a run outside the downloaded run list: what its jobs say about it
+            j0 = jobs[0]
+            run = runs[j0["run_id"]] = g.rec("PipelineRun", "github", j0["run_id"], {
+                "name": j0.get("workflow_name"), "started_at": utc(j0.get("started_at") or j0.get("created_at")),
+                "head_sha": j0.get("head_sha"), "attempt": j0.get("run_attempt")}, scope, acl_from=repo)
+            g.ref(run, "POINTS_TO", "Commit", j0["head_sha"], "field")
+        for j in jobs:
+            failed = [st["name"] for st in j.get("steps") or [] if st.get("conclusion") == "failure"]
+            chk = g.rec("Check", "github", j["id"], {
+                "name": j.get("name"), "kind": "job", "conclusion": j.get("conclusion"),
+                "started_at": utc(j.get("started_at")), "completed_at": utc(j.get("completed_at")),
+                "head_sha": j.get("head_sha"), "attempt": j.get("run_attempt"), "runner": j.get("runner_name"),
+                "summary": ("failed steps: " + ", ".join(failed)) if failed else None}, scope, acl_from=run)
+            g.link("IN", chk, run, "field", valid_from=utc(j.get("started_at") or j.get("created_at")))
+            g.notes["github: CI jobs (Check records)"] += 1
+    runs_total = len(J(d / "github/workflow_runs.json")) if (d / "github/workflow_runs.json").exists() else 0
+    g.notes["github: CI runs without job detail"] = max(0, runs_total - with_jobs)
 
 
 def _tags(g, d, repo, scope):

@@ -1,0 +1,636 @@
+{
+ "graph": "C:\\Users\\Kanthamai 4\\Desktop\\Archaea Beta mamata local\\ekg-eval-out\\apache-kafka\\graph.sqlite",
+ "as_of": "2026-11-04T15:47:27Z",
+ "questions": [
+  {
+   "category": "ticket_to_fix",
+   "question": "Which pull request fixed KAFKA-20925, and who approved it?",
+   "gold": {
+    "must": [
+     [
+      "#23821",
+      "23821"
+     ],
+     [
+      "AndrewJSchofield",
+      "AndrewJSchofield"
+     ]
+    ],
+    "none": false
+   },
+   "evidence": [
+    "n_f2a8c9357d37fd84199ee180db93781b",
+    "n_d81805636d1e8d4512c1140418100a70",
+    "n_682639a7f989ee9ad653f5c912dd3610"
+   ],
+   "id": "q001",
+   "asker": "public"
+  },
+  {
+   "category": "ticket_to_fix",
+   "question": "Which pull request fixed KAFKA-21294, and who approved it?",
+   "gold": {
+    "must": [
+     [
+      "#23840",
+      "23840"
+     ],
+     [
+      "chia7712",
+      "chia7712"
+     ]
+    ],
+    "none": false
+   },
+   "evidence": [
+    "n_30872eac6e9c28f270ee3fd72d629831",
+    "n_1cc2f82b439cf94541440aba51c0ff9e",
+    "n_9bb6ed68c3b441126b0d85e84a52194f"
+   ],
+   "id": "q002",
+   "asker": "public"
+  },
+  {
+   "category": "ticket_to_fix",
+   "question": "Which pull request fixed KAFKA-21019, and who approved it?",
+   "gold": {
+    "must": [
+     [
+      "#23427",
+      "23427"
+     ],
+     [
+      "chia7712",
+      "chia7712"
+     ]
+    ],
+    "none": false
+   },
+   "evidence": [
+    "n_ae4bda1dba1454ebebbb234c8c54c200",
+    "n_7446a3581344b1293a3a387366c56b38",
+    "n_9bb6ed68c3b441126b0d85e84a52194f"
+   ],
+   "id": "q003",
+   "asker": "public"
+  },
+  {
+   "category": "pr_to_ticket",
+   "question": "Which Jira ticket does pull request #23984 implement, and what is that ticket about?",
+   "gold": {
+    "must": [
+     [
+      "KAFKA-21230"
+     ]
+    ],
+    "none": false
+   },
+   "evidence": [
+    "n_2f36a850fe1dda8598a8e71c2cfb8bbf",
+    "n_476b0cb730f95548a6db5568c3e1959e"
+   ],
+   "id": "q004",
+   "asker": "public"
+  },
+  {
+   "category": "pr_to_ticket",
+   "question": "Which Jira ticket does pull request #23969 implement, and what is that ticket about?",
+   "gold": {
+    "must": [
+     [
+      "KAFKA-21273"
+     ]
+    ],
+    "none": false
+   },
+   "evidence": [
+    "n_4c1a91f1b2e2c0c5581ad9ce55e058ef",
+    "n_4d10912837784e1bfe52a7d8eb52037c"
+   ],
+   "id": "q005",
+   "asker": "public"
+  },
+  {
+   "category": "pr_to_ticket",
+   "question": "Which Jira ticket does pull request #23907 implement, and what is that ticket about?",
+   "gold": {
+    "must": [
+     [
+      "KAFKA-21329"
+     ]
+    ],
+    "none": false
+   },
+   "evidence": [
+    "n_ec0c7e81e8dcb3c2ddfe161d00c22bb3",
+    "n_15919dbfd3101675b1dc5ad96c899e33"
+   ],
+   "id": "q006",
+   "asker": "public"
+  },
+  {
+   "category": "commit_to_pr",
+   "question": "Which pull request does commit 831fdfec11 come from, and who opened that pull request?",
+   "gold": {
+    "must": [
+     [
+      "#23107",
+      "23107"
+     ],
+     [
+      "adikou",
+      "adikou"
+     ]
+    ],
+    "none": false
+   },
+   "evidence": [
+    "n_764428aab649cecb382d8fa6de8d1b04",
+    "n_b3f917eee4c07fe42278cbe741a1b24d",
+    "n_4fe8fc7822ca3f8e7d2f1d7ca511f90c"
+   ],
+   "id": "q007",
+   "asker": "public"
+  },
+  {
+   "category": "commit_to_pr",
+   "question": "Which pull request does commit c1cdb9efcd come from, and who opened that pull request?",
+   "gold": {
+    "must": [
+     [
+      "#22632",
+      "22632"
+     ],
+     [
+      "majialoong",
+      "majialoong"
+     ]
+    ],
+    "none": false
+   },
+   "evidence": [
+    "n_917191e70cc2f13a435dddd1b3dcaa96",
+    "n_57088c183e7162a5cae91d96d37e5fcb",
+    "n_5cc7b88a6c8bf14ae443c0f97a861dfa"
+   ],
+   "id": "q008",
+   "asker": "public"
+  },
+  {
+   "category": "commit_to_pr",
+   "question": "Which pull request does commit dfd3dcab07 come from, and who opened that pull request?",
+   "gold": {
+    "must": [
+     [
+      "#23791",
+      "23791"
+     ],
+     [
+      "bbejeck",
+      "bbejeck"
+     ]
+    ],
+    "none": false
+   },
+   "evidence": [
+    "n_ad0840127ee30faa5dde298c963b5a66",
+    "n_b72634cd4e62d0fcc5df7ae300bfdf7c",
+    "n_ab895893fe95db381227b963e06247a1"
+   ],
+   "id": "q009",
+   "asker": "public"
+  },
+  {
+   "category": "ticket_status",
+   "question": "What is the current status of KAFKA-20617, and who is it assigned to?",
+   "gold": {
+    "must": [
+     [
+      "Resolved"
+     ],
+     [
+      "Gaurav Narula",
+      "gnarula"
+     ]
+    ],
+    "none": false
+   },
+   "evidence": [
+    "n_c61e0ae1dc1eab4e287a4fe953a829d4",
+    "n_5be7554f6bf7ff74fffd107843ea2f41",
+    "n_03a35adb552a26e94678982642f288c2"
+   ],
+   "id": "q010",
+   "asker": "public"
+  },
+  {
+   "category": "ticket_status",
+   "question": "What is the current status of KAFKA-4928, and who is it assigned to?",
+   "gold": {
+    "must": [
+     [
+      "Open"
+     ],
+     [
+      "Volk Huang",
+      "JIRAUSER306031"
+     ]
+    ],
+    "none": false
+   },
+   "evidence": [
+    "n_f62fece34da3073ea60bdef37e88a599",
+    "n_5f05a1d30d07187ba71898ee9d941e99",
+    "n_58ae32e7f843b5aaba56d825381f1e1d"
+   ],
+   "id": "q011",
+   "asker": "public"
+  },
+  {
+   "category": "ticket_status",
+   "question": "What is the current status of KAFKA-21052, and who is it assigned to?",
+   "gold": {
+    "must": [
+     [
+      "Open"
+     ],
+     [
+      "Cheng Yi Chang",
+      "parkerchang"
+     ]
+    ],
+    "none": false
+   },
+   "evidence": [
+    "n_4cf1b0682e893e583504084d6c2a003d",
+    "n_5f05a1d30d07187ba71898ee9d941e99",
+    "n_eb5684503620d9f733a1a607175a6c56"
+   ],
+   "id": "q012",
+   "asker": "public"
+  },
+  {
+   "category": "state_as_of",
+   "question": "What state was KAFKA-19277 in at the end of 2025-05-13 (UTC)?",
+   "gold": {
+    "must": [
+     [
+      "Open"
+     ]
+    ],
+    "none": false
+   },
+   "evidence": [
+    "n_fea6b5181c4786c46446ed44b3786799",
+    "n_5f05a1d30d07187ba71898ee9d941e99"
+   ],
+   "id": "q013",
+   "asker": "public"
+  },
+  {
+   "category": "state_as_of",
+   "question": "What state was KAFKA-9528 in at the end of 2020-02-08 (UTC)?",
+   "gold": {
+    "must": [
+     [
+      "Open"
+     ]
+    ],
+    "none": false
+   },
+   "evidence": [
+    "n_fdc3f33222ae634bf21d08452514a98e",
+    "n_5f05a1d30d07187ba71898ee9d941e99"
+   ],
+   "id": "q014",
+   "asker": "public"
+  },
+  {
+   "category": "state_as_of",
+   "question": "What state was KAFKA-15821 in at the end of 2023-11-14 (UTC)?",
+   "gold": {
+    "must": [
+     [
+      "Open"
+     ]
+    ],
+    "none": false
+   },
+   "evidence": [
+    "n_81999fc65728ffef9e5b446834cf1f32",
+    "n_5f05a1d30d07187ba71898ee9d941e99"
+   ],
+   "id": "q015",
+   "asker": "public"
+  },
+  {
+   "category": "kip_status",
+   "question": "What is the status of KIP-1311, and on which mailing-list thread was it discussed or voted?",
+   "gold": {
+    "must": [
+     [
+      "proposed"
+     ],
+     [
+      "KIP-1311"
+     ]
+    ],
+    "none": false,
+    "threads": [
+     "[DISCUSS] KIP-1311: Make Time/Timer public API",
+     "[DISCUSS] KIP-1311: Make Time/Timer public API",
+     "[DISCUSS] KIP-1311: Make Time/Timer public API",
+     "[DISCUSS] KIP-1311: Make Time/Timer public API",
+     "[DISCUSS] KIP-1311: Make Time/Timer public API"
+    ]
+   },
+   "evidence": [
+    "n_1235c8eb7c16fb2dd3939699247a9d02",
+    "n_ce30e72852e76b375f3955b492074840",
+    "n_b6459c2b39c3ea0773e54c8129226d4f",
+    "n_6b7819a48bc486fa52f598b9d12f48bb",
+    "n_fc57010933a871cf0da04b3ed54d3a33",
+    "n_4c689a3c1d475fc79fad7e8c30b7ef92"
+   ],
+   "id": "q016",
+   "asker": "public"
+  },
+  {
+   "category": "kip_status",
+   "question": "What is the status of KIP-1307, and on which mailing-list thread was it discussed or voted?",
+   "gold": {
+    "must": [
+     [
+      "proposed"
+     ],
+     [
+      "KIP-1307"
+     ]
+    ],
+    "none": false,
+    "threads": [
+     "[VOTE] KIP-1307: SerDe and Interceptor metrics"
+    ]
+   },
+   "evidence": [
+    "n_6711208ff54340956fbcd0b278da1aac",
+    "n_a9ead793be4d54d01cbdf4a4d8f10fed"
+   ],
+   "id": "q017",
+   "asker": "public"
+  },
+  {
+   "category": "kip_status",
+   "question": "What is the status of KIP-1340, and on which mailing-list thread was it discussed or voted?",
+   "gold": {
+    "must": [
+     [
+      "accepted"
+     ],
+     [
+      "KIP-1340"
+     ]
+    ],
+    "none": false,
+    "threads": [
+     "[VOTE] KIP-1340: Expose Both Mapped Key and Stream Key in  Streams-GlobalKTable Joins"
+    ]
+   },
+   "evidence": [
+    "n_29ccac26db30649e9167d184da420dc7",
+    "n_fb30765a823591fa26ffe0d1b1b25048"
+   ],
+   "id": "q018",
+   "asker": "public"
+  },
+  {
+   "category": "top_contributor",
+   "question": "Who wrote the most commits that changed files under group-coordinator/src/main/java/ in this data, and roughly how many?",
+   "gold": {
+    "must": [
+     [
+      "David Jacot",
+      "dajac@apache.org"
+     ]
+    ],
+    "none": false,
+    "count": 15
+   },
+   "evidence": [
+    "n_6078336e93e814c3dbbd2fea867e919b"
+   ],
+   "id": "q019",
+   "asker": "public"
+  },
+  {
+   "category": "top_contributor",
+   "question": "Who wrote the most commits that changed files under clients/clients-integration-tests/src/test/ in this data, and roughly how many?",
+   "gold": {
+    "must": [
+     [
+      "YANG-SYUAN CHOU",
+      "dino2895un@gmail.com"
+     ]
+    ],
+    "none": false,
+    "count": 5
+   },
+   "evidence": [
+    "n_ee163bbe5dfd2a86b3becf841da55f6c"
+   ],
+   "id": "q020",
+   "asker": "public"
+  },
+  {
+   "category": "top_contributor",
+   "question": "Who wrote the most commits that changed files under clients/src/test/java/ in this data, and roughly how many?",
+   "gold": {
+    "must": [
+     [
+      "Andrew Schofield",
+      "aschofield@confluent.io"
+     ]
+    ],
+    "none": false,
+    "count": 7
+   },
+   "evidence": [
+    "n_589ad8761eadcd396bea39a9f6cad49c"
+   ],
+   "id": "q021",
+   "asker": "public"
+  },
+  {
+   "category": "count",
+   "question": "How many Jira tickets were resolved as Fixed in October 2026?",
+   "gold": {
+    "must": [
+     [
+      "76"
+     ]
+    ],
+    "none": false
+   },
+   "evidence": [],
+   "id": "q022",
+   "asker": "public"
+  },
+  {
+   "category": "count",
+   "question": "How many pull requests were merged in October 2026?",
+   "gold": {
+    "must": [
+     [
+      "66"
+     ]
+    ],
+    "none": false
+   },
+   "evidence": [],
+   "id": "q023",
+   "asker": "public"
+  },
+  {
+   "category": "person_accounts",
+   "question": "Which tool accounts does Walker Carlson have?",
+   "gold": {
+    "must": [
+     [
+      "wcalrson"
+     ],
+     [
+      "wcarlson"
+     ]
+    ],
+    "none": false
+   },
+   "evidence": [
+    "n_1c957667a0246564a542ff37099a4c9e"
+   ],
+   "id": "q024",
+   "asker": "public"
+  },
+  {
+   "category": "person_accounts",
+   "question": "Which tool accounts does PoAn Yang have?",
+   "gold": {
+    "must": [
+     [
+      "JIRAUSER300229"
+     ],
+     [
+      "payang"
+     ]
+    ],
+    "none": false
+   },
+   "evidence": [
+    "n_9a96b2396546100cf1611a629dcc25ed"
+   ],
+   "id": "q025",
+   "asker": "public"
+  },
+  {
+   "category": "person_accounts",
+   "question": "Which tool accounts does David Arthur have?",
+   "gold": {
+    "must": [
+     [
+      "davidarthur"
+     ],
+     [
+      "mumrah"
+     ]
+    ],
+    "none": false
+   },
+   "evidence": [
+    "n_b3ff34bd667277dd06058bb8f3c59b00"
+   ],
+   "id": "q026",
+   "asker": "public"
+  },
+  {
+   "category": "knowledge_about",
+   "question": "What was decided, or which rules or requirements were stated, about KAFKA-21045?",
+   "gold": {
+    "must": [
+     [
+      "KAFKA-21045"
+     ]
+    ],
+    "none": false,
+    "statements": [
+     "The default assignment refiner must be registered in the native-image reflect-config.json to retain its no-arg constructor."
+    ]
+   },
+   "evidence": [
+    "n_f4ed8963cb9354172b1708a259e064cc",
+    "n_e0f96a67d6c21d18a91a54cd84a58d14"
+   ],
+   "id": "q027",
+   "asker": "public"
+  },
+  {
+   "category": "knowledge_about",
+   "question": "What was decided, or which rules or requirements were stated, about KAFKA-20865?",
+   "gold": {
+    "must": [
+     [
+      "KAFKA-20865"
+     ]
+    ],
+    "none": false,
+    "statements": [
+     "KIP-1312: Support unregistering controllers",
+     "Before unregistering a voter, it must be removed from controller.quorum.voters on all Kafka nodes.",
+     "After unregistering, ensure the voter is no longer part of controller.quorum.voters on every Kafka node."
+    ]
+   },
+   "evidence": [
+    "n_54beead4a6b66d9106ddd926e157942d",
+    "n_04cc381fede98fff6998f07d357a0f2b",
+    "n_de117aba6d225a08b3dc97180d403b3e",
+    "n_e985ea5da869c2d7430d31989208067f"
+   ],
+   "id": "q028",
+   "asker": "public"
+  },
+  {
+   "category": "knowledge_about",
+   "question": "What was decided, or which rules or requirements were stated, about KAFKA-21043?",
+   "gold": {
+    "must": [
+     [
+      "KAFKA-21043"
+     ]
+    ],
+    "none": false,
+    "statements": [
+     "KIP-83 - Allow multiple SASL authenticated Java clients in a single JVM process",
+     "KIP-86: Configurable SASL callback handlers"
+    ]
+   },
+   "evidence": [
+    "n_8a3cc589ee727b971361201439ba97b1",
+    "n_cdebd13a8e6b2ceccd24419b01473214",
+    "n_4a1b53906a379d0c6f9505b720620c47"
+   ],
+   "id": "q029",
+   "asker": "public"
+  },
+  {
+   "category": "none_expected",
+   "question": "Which pull request fixed KAFKA-21261?",
+   "gold": {
+    "must": [],
+    "none": true
+   },
+   "evidence": [
+    "n_f3e61ba74ea94b5fe021475c03454bfb"
+   ],
+   "id": "q030",
+   "asker": "public"
+  }
+ ]
+}
