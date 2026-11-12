@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from pathlib import Path
 
 NONE_RX = re.compile(r"\b(no|not|none|nothing|cannot find|could not find|isn't|is not|doesn't|does not|unknown)\b", re.I)
@@ -65,7 +66,9 @@ def as_of_time(s: str | None) -> str | None:
 
 
 def _norm(s: str) -> str:
-    return re.sub(r"\s+", " ", re.sub(r"[*`_\"'“”‘’]", "", str(s))).strip().lower()
+    """Case, spacing, markdown marks and accents ignored ("Harmadás" matches "Harmadas")."""
+    s = "".join(c for c in unicodedata.normalize("NFKD", str(s)) if not unicodedata.combining(c))
+    return re.sub(r"\s+", " ", re.sub(r"[*`_\"'“”‘’]", "", s)).strip().lower()
 
 
 def _has(answer: str, phrase: str) -> bool:
@@ -94,6 +97,7 @@ def judge_prompt(q: dict, answer: str) -> str:
     return "\n".join([
         "You grade an answer to a question about a software project's engineering data. Judge only whether the",
         "ANSWER states each fact; wording may differ, and extra correct detail is fine. A fact stated wrongly is not met.",
+        "Differences in accents, case or formatting of a name (Harmadás / Harmadas, mjsax / MJSAX) are not errors.",
         "", f"QUESTION: {q['question']}", "", f"GOLD ANSWER: {q.get('gold_answer') or ''}", "", "FACTS:", *lines,
         "", f"EXPECTED BEHAVIOUR: {'abstain: say the data cannot answer this, and why' if q['behavior'] == 'abstain' else 'answer'}",
         "", "<<<ANSWER", answer or "(empty)", "ANSWER>>>", "",

@@ -57,6 +57,13 @@ async def run(args):
     if args.categories:
         keep = set(args.categories.split(","))
         qs = [q for q in qs if q["category"] in keep]
+    if args.only_failed:  # rerun what did not pass in an earlier run (failed or not graded)
+        done = {}
+        for line in open(args.only_failed, encoding="utf-8"):
+            row = json.loads(line)
+            done[row["id"]] = row.get("pass")
+        qs = [q for q in qs if done.get(q["id"]) is not True]
+        print(f"rerunning {len(qs)} questions that did not pass in {args.only_failed}")
     if args.limit:
         qs = qs[: args.limit]
     graph_path = args.graph or meta.get("graph") or str(HERE.parent / "ekg-eval-out" / "apache-kafka" / "graph.sqlite")
@@ -86,11 +93,13 @@ async def run(args):
             t = time.time()
             try:
                 if args.api:
-                    res = await stream_ask(args.api, q["question"], as_of=at, asker=q["asker"],
+                    res = await asyncio.wait_for(stream_ask(args.api, q["question"], as_of=at, asker=q["asker"],
                                            service_token=None if args.user_token else os.environ.get("QUERY_MASTER_SERVICE_TOKEN"),
-                                           user_token=args.user_token, max_steps=args.max_steps)
+                                           user_token=args.user_token, max_steps=args.max_steps), args.question_timeout)
                 else:
                     res = await ask(q["question"], Tools(views[key]), client=client, max_steps=args.max_steps)
+            except asyncio.TimeoutError:  # a stalled provider is a failed question, not a stalled run
+                res = {"answer": "", "tool_calls": [], "usage": {}, "stopped": f"timeout after {args.question_timeout}s"}
             except Exception as e:  # a failed call is a failed question, not a failed run
                 res = {"answer": "", "tool_calls": [], "usage": {}, "stopped": f"error: {type(e).__name__}: {e}"[:300]}
             secs = round(time.time() - t, 1)
@@ -151,6 +160,8 @@ def main() -> int:
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--concurrency", type=int, default=3)
     ap.add_argument("--max-steps", type=int, default=12)
+    ap.add_argument("--only-failed", default=None, help="an earlier results.jsonl: ask only what did not pass there")
+    ap.add_argument("--question-timeout", type=int, default=900, help="seconds one question may take (with --api)")
     ap.add_argument("--api", default=None, help="a running query-master, e.g. http://127.0.0.1:7111: ask through its endpoint")
     ap.add_argument("--user-token", default=None, help="with --api: a signed-in user's token (else QUERY_MASTER_SERVICE_TOKEN)")
     a = ap.parse_args()

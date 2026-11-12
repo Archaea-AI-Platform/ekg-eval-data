@@ -1,0 +1,51 @@
+{
+ "combined_passed": 51,
+ "graded": 119,
+ "by_pillar": {
+  "code": "4/12",
+  "conversations": "4/6",
+  "cross-cov": "7/27",
+  "cross-xpc": "1/4",
+  "cross-xpd": "1/5",
+  "cross-xpp": "0/3",
+  "cross-xpx": "4/4",
+  "documents": "4/10",
+  "knowledge": "7/19",
+  "people": "4/6",
+  "single-a": "5/8",
+  "single-b": "7/10",
+  "tickets": "3/5"
+ },
+ "by_category": {
+  "aggregation": "0/1",
+  "comparison": "0/1",
+  "conflict": "1/3",
+  "count": "0/5",
+  "filter": "1/1",
+  "identity": "1/3",
+  "list": "0/1",
+  "lookup": "28/60",
+  "multi_hop": "1/14",
+  "negative": "10/12",
+  "ordering": "1/2",
+  "permission": "1/1",
+  "rationale": "1/2",
+  "temporal": "1/3",
+  "trap": "3/8",
+  "unanswerable": "2/2"
+ },
+ "by_difficulty": {
+  "1": "18/33",
+  "2": "11/25",
+  "3": "6/28",
+  "4": "3/15",
+  "5": "13/18"
+ },
+ "new_passes": [
+  "COV-030",
+  "COV-033",
+  "KNW-032",
+  "SHC-023",
+  "XPX-029"
+ ]
+}

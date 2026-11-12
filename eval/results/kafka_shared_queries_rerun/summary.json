@@ -1,0 +1,78 @@
+{
+ "questions": 73,
+ "graded": 73,
+ "passed": 5,
+ "by_pillar": {
+  "code": "0/8",
+  "conversations": "0/2",
+  "cross-cov": "2/22",
+  "cross-xpc": "0/3",
+  "cross-xpd": "0/4",
+  "cross-xpp": "0/3",
+  "cross-xpx": "1/1",
+  "documents": "0/6",
+  "knowledge": "1/13",
+  "people": "0/2",
+  "single-a": "0/3",
+  "single-b": "0/3",
+  "tickets": "1/3"
+ },
+ "by_category": {
+  "aggregation": "0/1",
+  "comparison": "0/1",
+  "conflict": "0/2",
+  "count": "0/5",
+  "identity": "0/2",
+  "list": "0/1",
+  "lookup": "3/35",
+  "multi_hop": "0/13",
+  "negative": "0/2",
+  "ordering": "0/1",
+  "rationale": "1/2",
+  "temporal": "0/2",
+  "trap": "1/6"
+ },
+ "by_method": {
+  "judge": "5/43",
+  "script": "0/30"
+ },
+ "by_difficulty": {
+  "1": "2/17",
+  "2": "0/14",
+  "3": "2/24",
+  "4": "0/12",
+  "5": "1/6"
+ },
+ "tool_calls_per_question": 9.8,
+ "tools_used": {
+  "find": 195,
+  "links": 133,
+  "search": 110,
+  "get": 90,
+  "resolve": 75,
+  "overview": 62,
+  "history": 13,
+  "count": 8,
+  "schema": 7,
+  "sources": 7,
+  "experts": 6,
+  "discussions": 3,
+  "types": 2,
+  "why": 2,
+  "who_owns": 2,
+  "who_to_ask": 1,
+  "person": 1
+ },
+ "tokens": {
+  "prompt_tokens": 4241783,
+  "completion_tokens": 35802
+ },
+ "stopped": {
+  "answered": 73
+ },
+ "model": "mistralai/devstral-2512",
+ "judge": "mistralai/devstral-2512",
+ "via": "query-master API http://127.0.0.1:7111",
+ "graph": "http://127.0.0.1:7111 (query-master's store)",
+ "questions_file": "ekg-eval-data/eval/kafka_shared_queries.jsonl"
+}
