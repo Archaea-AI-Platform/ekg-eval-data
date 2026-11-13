@@ -10,7 +10,7 @@ import re
 from pathlib import Path
 
 from .access import place
-from .common import Graph, J, file_props, ticket_rx, utc
+from .common import Graph, J, file_props, repo_tags, ticket_rx, utc
 
 CLOSES = re.compile(r"\b(close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s+#(\d+)\b", re.I)
 CHANGE_TYPE = {"added": "added", "removed": "removed", "modified": "modified", "renamed": "renamed",
@@ -69,6 +69,22 @@ def map_github(g: Graph, d: Path, repo_name: str):
             label_recs[name] = g.rec("Label", "github", f"{repo_json['id']}:{name}", {"name": name, "kind": "code"}, scope)
         return label_recs[name]
 
+    # every label the repository defines, not only those a downloaded PR carries
+    for lb in J(d / "github/labels.json") if (d / "github/labels.json").exists() else []:
+        if lb.get("name"):
+            label(lb["name"])
+    milestones = {}
+    for ms in J(d / "github/milestones.json") if (d / "github/milestones.json").exists() else []:
+        milestones[ms["number"]] = g.rec("Milestone", "github", ms["id"], {"name": ms.get("title"),
+                                         "created_at": utc(ms.get("created_at")), "target_date": utc(ms.get("due_on")),
+                                         "number": ms.get("number"), "state": ms.get("state"),
+                                         "closed_at": utc(ms.get("closed_at"))},
+                                         scope, acl_from=repo)
+        g.link("IN", milestones[ms["number"]], repo, "field", valid_from=utc(ms.get("created_at")))
+        if ms.get("creator"):
+            g.link("CREATED_BY", milestones[ms["number"]], account(ms["creator"]), "field", role="creator",
+                   at=utc(ms.get("created_at")))
+    commits = g.ctx.setdefault("commits", {})
     prs = g.ctx.setdefault("prs", {})
     for path in sorted((d / "github/pulls").glob("pr-*.json")):
         x = J(path)
@@ -85,6 +101,8 @@ def map_github(g: Graph, d: Path, repo_name: str):
                    "base_ref": base.get("ref"), "head_ref": head.get("ref")}, scope, acl_from=repo)
         prs[p["number"]] = pr
         g.link("IN", pr, repo, "field", valid_from=created)
+        if (p.get("milestone") or {}).get("number") in milestones:
+            g.link("IN", pr, milestones[p["milestone"]["number"]], "field", valid_from=created)
         if base.get("ref"):
             g.link("BASE", pr, branch(base["ref"]), "field", valid_from=created)
         if head.get("label"):
@@ -159,20 +177,33 @@ def map_github(g: Graph, d: Path, repo_name: str):
                 g.link("ON", threads[root], pr, "field", at=at)
             cm = g.rec("Comment", "github", c["id"], {"text": c["body"], "kind": "review", "at": at, "path": c["path"],
                        "line": c.get("line"), "side": c.get("side"), "commit_id": c["commit_id"],
-                       "original_commit_id": c.get("original_commit_id")}, scope, acl_from=pr)
+                       "original_commit_id": c.get("original_commit_id"), **_reactions(c)}, scope, acl_from=pr)
             g.link("IN", cm, threads[root], "field", valid_from=at)
+            g.link("ON", cm, pr, "field", at=at)  # a review comment is a comment on the PR too
             g.link("AUTHORED_BY", cm, account(c["user"]), "field", role="author", at=at)
             if fp := files.get(c["path"]):
                 g.link("ON", cm, fp, "field", at=at, line=c.get("line"), side=c.get("side"), at_commit=c["commit_id"])
         for c in x.get("issue_comments") or []:
             at = utc(c["created_at"])
-            cm = g.rec("Comment", "github", c["id"], {"text": c["body"], "kind": "conversation", "at": at}, scope, acl_from=pr)
+            cm = g.rec("Comment", "github", c["id"], {"text": c["body"], "kind": "conversation", "at": at, **_reactions(c)},
+                       scope, acl_from=pr)
             g.link("ON", cm, pr, "field", at=at)
             g.link("AUTHORED_BY", cm, account(c["user"]), "field", role="author", at=at)
             if c["user"]["type"] == "Bot":
                 g.notes["github: bot comments (CI notices, kept but marked by the bot author)"] += 1
         # the PR's own commits (head commits, mostly not on trunk): referenced by sha for the linker
         for pos, c in enumerate(x.get("commits") or []):
+            # the PR's own commits (mostly on its branch, not on trunk): records of their own, so the PR's commit
+            # count and history are in the graph; a trunk commit with the same sha is the same record
+            inner = c.get("commit") or {}
+            if c["sha"] not in commits:
+                commits[c["sha"]] = g.rec("Commit", "git", c["sha"], {
+                    "sha": c["sha"], "message": inner.get("message"),
+                    "authored_at": utc((inner.get("author") or {}).get("date")),
+                    "committed_at": utc((inner.get("committer") or {}).get("date"))}, scope, acl_from=repo)
+                if c.get("author"):
+                    g.link("AUTHORED_BY", commits[c["sha"]], account(c["author"]), "field", role="author",
+                           at=utc((inner.get("author") or {}).get("date")))
             g.ref(pr, "CONTAINS", "Commit", c["sha"], "field", position=pos, valid_from=created)
 
     _ci(g, d, repo, scope, account)
@@ -217,7 +248,9 @@ def _ci(g, d, repo, scope, account):
     for r in J(d / "github/workflow_runs.json") if (d / "github/workflow_runs.json").exists() else []:
         run = runs[r["id"]] = g.rec("PipelineRun", "github", r["id"], {"name": r["name"], "event": r["event"], "conclusion": r["conclusion"],
                     "started_at": utc(r.get("run_started_at") or r["created_at"]), "head_sha": r["head_sha"],
-                    "attempt": r.get("run_attempt")}, scope, acl_from=repo)
+                    "attempt": r.get("run_attempt"), "run_number": r.get("run_number"),
+                    "head_branch": r.get("head_branch"), "previous_attempt_url": r.get("previous_attempt_url")},
+                    scope, acl_from=repo)
         if r["workflow_id"] in pipelines:
             g.link("INSTANCE_OF", run, pipelines[r["workflow_id"]], "field")
         if r.get("actor"):
@@ -253,6 +286,19 @@ def _ci(g, d, repo, scope, account):
 def _tags(g, d, repo, scope):
     if not (d / "github/tags.json").exists():
         return
+    local = repo_tags(d)  # dates and the commit a tag really points to, from repo.git when it is there
+    g.ctx["tag_targets"] = {v["sha"] for v in local.values() if v.get("sha")}
     for t in J(d / "github/tags.json"):
         tag = g.rec("Tag", "github", f"{repo['props']['native_id']}:{t['name']}", {"name": t["name"]}, scope, acl_from=repo)
-        g.ref(tag, "POINTS_TO", "Commit", t["commit"]["sha"], "field", role="tag")
+        info = local.get(t["name"]) or {}
+        g.ref(tag, "POINTS_TO", "Commit", info.get("sha") or t["commit"]["sha"], "field", role="tag",
+              valid_from=utc(info.get("date")))
+
+
+def _reactions(c) -> dict:
+    """A comment's reaction totals (the code host gives counts per emoji, not who reacted)."""
+    r = c.get("reactions") or {}
+    per = {k: v for k, v in r.items() if k not in ("url", "total_count") and isinstance(v, int) and v}
+    if "total_count" not in r:
+        return {}
+    return {"reaction_count": r["total_count"], "reactions": per or None}

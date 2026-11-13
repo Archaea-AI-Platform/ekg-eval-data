@@ -55,6 +55,15 @@ def main() -> int:
     checks.append(("this kit's own format: every must group", run(q(grading="rules", must=[["#42", "42"], ["bob"]]), "PR #42 by Bob")["pass"] is True
                    and run(q(grading="rules", must=[["#42"], ["bob"]]), "PR #42")["pass"] is False))
     checks.append(("as_of: a day means the end of that day", as_of_time("2026-10-29") == "2026-10-29T23:59:59Z"))
+    checks.append(("PR 20011, PR-20011 and #20011 are the same reference",
+                   run(q(variants=["PR 20011"]), "Fixed in #20011 since 2025-08-19")["pass"] is True
+                   and run(q(variants=["#20011"]), "pull request 20011")["pass"] is True))
+    checks.append(("a list passes with every item in any order",
+                   run(q(variants=["IsolationLevel, TopicPartition, Uuid"]), "Uuid, TopicPartition and IsolationLevel")["pass"] is True
+                   and run(q(variants=["IsolationLevel, TopicPartition, Uuid"]), "Uuid and TopicPartition")["pass"] is False))
+    fb = run(q(variants=["exact phrase"], checklist=facts), "A.", j_ok)
+    checks.append(("a script miss goes to the judge, labelled apart", fb["pass"] is True and fb["method"] == "script->judge"))
+    checks.append(("...but never past must_not_say", run(q(variants=["x y z"], checklist=facts, must_not_say=["A."]), "A.", j_ok)["pass"] is False))
     for name, ok in checks:
         print(f"  {'PASS' if ok else 'FAIL'}  {name}")
     failed = [n for n, ok in checks if not ok]

@@ -30,6 +30,11 @@ from .common import Graph, from_dt, ticket_rx
 JIRA_NOTICE = re.compile(r"^\[jira\] \[(\w+)\] \(([A-Z][A-Z0-9]+-\d+)\)")
 GH_URL = re.compile(r"https://github\.com/([\w.-]+/[\w.-]+)/(pull|issues)/(\d+)")
 GH_REF = re.compile(r"(?<![\w/&#])#(\d{1,6})\b")
+# a vote in a reply: "+1 (binding)", "Thanks! +1 (non-binding).", "-1"
+VOTE_LINE = re.compile(r"(?<![\w+-])([+-][01])(?![\d.])([^\n]{0,60})")
+NUMBER_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9,
+                "ten": 10, "eleven": 11, "twelve": 12}
+TALLY = re.compile(r"\b(\d{1,2}|" + "|".join(NUMBER_WORDS) + r")\s+(non[- ]?binding|binding)\s*(?:\+1|votes?|\(\+1)", re.I)
 
 
 def header(value):
@@ -150,6 +155,8 @@ def _one(g, m, folder, s, lists, messages, addresses, threads, decided, in_list,
 
     name, sender = email.utils.parseaddr(header(m["From"]))
     sender = sender.lower()
+    if m["From"]:  # the From header as sent ("Chia-Ping Tsai (Jira) via dev <dev@kafka.apache.org>"): one sender identity
+        msg["props"]["from_header"] = (f'{name} <{sender}>' if name else sender) if sender else header(m["From"])[:300]
     refs = (m["References"] or "").split()
     parent = (m["In-Reply-To"] or "").strip()
     parents.append((mid, parent))
@@ -160,6 +167,15 @@ def _one(g, m, folder, s, lists, messages, addresses, threads, decided, in_list,
                               [list(lst["scope"][0])])
     g.link("IN", msg, threads[root], "field", valid_from=sent)
 
+    if name and not msg["props"].get("sender_name"):  # the display name as sent ("Ismael Juma (Jira)")
+        msg["props"]["sender_name"] = re.sub(r"\s+via\s+\S+$", "", name).strip().strip('"') or None
+    for cc_name, cc in email.utils.getaddresses([header(m["Cc"])] if m["Cc"] else []):
+        cc = cc.lower()
+        if cc and "@" in cc and cc not in lists:
+            if cc not in addresses:
+                addresses[cc] = g.rec("EmailAddress", "email", cc, {"address": cc, "display_name": cc_name or None,
+                                      "normalized_value": cc}, lst["scope"])
+            g.link("SENT_TO", msg, addresses[cc], "field", role="cc", at=sent)
     tool = notifiers.get(sender)
     if not sender:
         g.notes["mail: From header with no parseable address"] += 1
@@ -167,6 +183,7 @@ def _one(g, m, folder, s, lists, messages, addresses, threads, decided, in_list,
         name = re.sub(r"\s+via\s+\S+$", "", name or "").strip().strip('"')
         if name:
             msg["props"]["sender_name"] = name
+        msg["props"]["self_reported_sender"] = True  # the list relayed it: only the display name says who sent it
         g.notes["mail: sender rewritten to the list address (sender_name kept, no FROM link)"] += 1
     else:
         if sender not in addresses:
@@ -221,3 +238,97 @@ def _one(g, m, folder, s, lists, messages, addresses, threads, decided, in_list,
         if dt_hit and root not in decided:  # once per thread: its first message in the archive
             decided.add(root)
             g.ref(msg, "MADE_IN", "Decision", int(dt_hit.group(2)), "text_rule", 0.8, reverse=True, at=sent)
+        if dt_hit and dt_hit.group(1).upper() in ("VOTE", "RESULT") and s.get("vote_threads"):
+            _votes(g, msg, int(dt_hit.group(2)), quoted, addresses.get(sender) if sender not in lists else None, sent)
+
+
+def _votes(g, msg, kip, text, voter, sent):
+    """A [VOTE] thread: a reply that votes makes its sender a voter on the decision (DECIDED_BY role voter, with
+    the vote and whether it binds); a message that states the tally ("4 binding +1 and 1 non-binding +1") sets
+    it on the decision (the latest such message wins)."""
+    _acceptance(g, msg, kip, text, voter, sent)
+    tally = {}
+    for n, kind in TALLY.findall(text):
+        key = "non_binding_votes" if kind.lower().startswith("non") else "binding_votes"
+        tally.setdefault(key, int(n) if n.isdigit() else NUMBER_WORDS[n.lower()])
+    if tally:
+        tallies = g.ctx.setdefault("kip_tally", {})
+        if sent and (kip not in tallies or (tallies[kip]["at"] or "") <= sent):
+            tallies[kip] = {**tally, "at": sent}
+        g.notes["mail: KIP vote tallies read from a vote thread"] += 1
+        return  # a message that reports the tally does not cast a vote
+    head = []  # the reply's own words, before the quoted message ("On ... wrote:")
+    for line in text.strip().splitlines()[:12]:
+        if re.match(r"\s*On .{4,}", line) and ("wrote" in line or len(head) > 1):
+            break
+        head.append(line)
+    m = VOTE_LINE.search("\n".join(head))
+    if not m:
+        return
+    if voter is None:  # the list rewrote From: the sender's name is all there is
+        voter = _voter_by_name(g, msg["props"].get("sender_name"), msg)
+        if voter is None:
+            return
+    note = m.group(2).lower()
+    binding = False if re.search(r"non[- ]?bin?d", note) else True if re.search(r"\bbi\w{0,3}ing\b", note) else None
+    g.ref(voter, "DECIDED_BY", "Decision", kip, "text_rule", 0.9, reverse=True, evidence=[msg], role="voter",
+          vote=m.group(1), binding=binding, at=sent)
+    g.notes["mail: KIP votes cast in a vote thread (DECIDED_BY role voter)"] += 1
+
+
+def _voter_by_name(g, name, msg):
+    """A voter known only by display name: the account of that exact name when one exists (a Jira account, say),
+    else an Alias holding the name."""
+    if not name:
+        return None
+    index = g.ctx.get("_accounts_by_name")
+    if index is None:
+        index = g.ctx["_accounts_by_name"] = {}
+        for r in g.records.values():
+            if r["type"] == "Account" and r["props"].get("display_name"):
+                index.setdefault(r["props"]["display_name"].strip().lower(), r)
+    hit = index.get(name.strip().lower())
+    if hit:
+        g.notes["mail: voter matched to an account by display name"] += 1
+        return hit
+    g.notes["mail: voter kept as a display-name alias"] += 1
+    return g.rec("Alias", "email", f"display_name:{name.strip().lower()}", {"value": name.strip(), "kind": "display_name",
+                 "namespace": "email", "normalized_value": name.strip().lower()}, msg["scope"])
+
+
+ACCEPTED = re.compile(r"\b(?:has|have) (?:now )?been accepted\b|\bis (?:now )?accepted\b|\bthe vote (?:has )?passed\b|"
+                      r"\bvote passes\b|\bhas passed the vote\b", re.I)
+WITHDRAWN = re.compile(r"\bkeep (?:it|the vote|the thread) open\b|\bchange the status\b|\bretract|\bwithdraw|"
+                       r"\b(?:re-?open)\b|\bnot (?:yet )?(?:be )?accepted\b|\bpremature", re.I)
+
+
+def _acceptance(g, msg, kip, text, voter, sent):
+    """In a vote thread, the one who announced the proposal accepted and later withdrew it (a vote closed too early,
+    say): the withdrawal is a Decision of its own that REVERSES the proposal's acceptance, from that message until
+    an acceptance announced again."""
+    who = voter or _voter_by_name(g, msg["props"].get("sender_name"), msg)
+    if who is None or not sent:
+        return
+    head = "\n".join(text.strip().splitlines()[:15])
+    state = g.ctx.setdefault("kip_acceptance", {}).setdefault(kip, {})
+    if ACCEPTED.search(head):
+        if state.get("withdrawn") is not None:  # accepted again: the reversal ends here
+            state["withdrawn"]["valid_to"] = sent
+            state["withdrawn"] = None
+        state["by"], state["at"] = who["id"], sent
+        return
+    own = (g.ctx.get("settings") or {}).get("withdrawal_phrases")
+    withdrawn = re.compile(own, re.I) if own else WITHDRAWN
+    if state.get("by") == who["id"] and state.get("at") and state["at"] < sent and withdrawn.search(head):
+        line = next((ln.strip() for ln in head.splitlines() if withdrawn.search(ln)), head[:200])
+        dec = g.rec("Decision", "derived", f"kip:{kip}:withdrawn:{msg['props']['message_id']}", {
+            "title": f"Acceptance of KIP-{kip} withdrawn",
+            "statement": f"{msg['props'].get('sender_name') or 'The announcer'} withdrew the acceptance of KIP-{kip} "
+                         f"announced {state['at']}: \"{line}\"",
+            "rationale": head[:1500], "status": "accepted", "decided_at": sent}, msg["scope"])
+        g.link("MADE_IN", dec, msg, "text_rule", 0.85, evidence=[msg], at=sent)
+        g.link("DECIDED_BY", dec, who, "text_rule", 0.85, evidence=[msg], role="decider", at=sent)
+        g.ref(dec, "REVERSES", "Decision", kip, "text_rule", 0.85, evidence=[msg], valid_from=sent, kind="withdrawal",
+              reason=line[:300])
+        state["withdrawn"] = g.refs[-1][7]  # the queued link's own fields: valid_to is set if it is accepted again
+        g.notes["mail: proposal acceptances withdrawn in the vote thread (Decision REVERSES)"] += 1

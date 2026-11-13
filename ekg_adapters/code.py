@@ -80,6 +80,26 @@ def map_code(g: Graph, d: Path):
                 g.notes["code: documentation files with text"] += 1
         if path.endswith(".py"):
             py.append((path, abs_path, f))
+    # a listing without the files (a blobless clone): the text of the files whose content is already in the local
+    # repo.git (contributor guides, templates, CI workflows, build files ...), read without fetching anything
+    if listing and all(a is None for _, a in listing):
+        texts = _local_texts(d, d / "code")
+        fetched = d / "code" / "files"  # files fetched apart, checked against the listing's blob sha (code/files/)
+        if fetched.is_dir():
+            for path in files:
+                p = fetched / path
+                if path not in texts and p.is_file():
+                    t = _read(p)
+                    if t and "\0" not in t[:8000]:
+                        texts[path] = t
+        for path, text in texts.items():
+            f = files.get(path)
+            if f is None or not text:
+                continue
+            cv = g.rec("ContentVersion", "git", f"{rid}:{path}:snapshot", {"version": "snapshot", "text": text,
+                       "note": "repository file (trunk snapshot)"}, scope, acl_from=f)
+            g.link("VERSION_OF", cv, f, "field", kind="revision", order=1)
+        g.notes["code: files with text from the local repository"] = len(texts)
     for path, abs_path, f in py:
         mod = path[:-3].replace("/", ".").removesuffix(".__init__")
         sym = g.rec("CodeSymbol", "git", f"{rid}:{mod}", {"qualified_name": mod, "kind": "module"}, scope, acl_from=f)
@@ -99,6 +119,62 @@ def map_code(g: Graph, d: Path):
         _python(g, path, abs_path, f, modules, scope, rid)
     g.notes["code: files in the tree"] = len(listing)
     g.notes["code: folders in the tree"] = len(folders)
+
+
+def _local_texts(d: Path, code_dir: Path) -> dict:
+    """{path: text} for the listed files whose blob is already in repo.git. Only objects the clone holds are read
+    (listed first with --batch-all-objects), lazy fetching is off, and nothing is written to the repository."""
+    import os
+    import subprocess
+    from .common import GIT_READ
+    repo = d / "git" / "repo.git"
+    tree = code_dir / "tree.jsonl"
+    if not repo.is_dir() or not tree.exists():
+        return {}
+    sha_of = {}
+    for line in tree.read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            r = json.loads(line)
+            if r.get("sha"):
+                sha_of[r["path"].strip("/")] = r["sha"]
+    env = {**os.environ, "GIT_NO_LAZY_FETCH": "1"}
+    base = ["git", "--git-dir", str(repo), *GIT_READ, "cat-file"]
+    try:
+        listed = subprocess.run([*base, "--batch-check=%(objectname) %(objecttype) %(objectsize)", "--batch-all-objects"],
+                                capture_output=True, env=env, timeout=600, check=True).stdout.decode()
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    local = {}
+    for row in listed.splitlines():
+        sha, kind, size = (row.split() + ["", "", "0"])[:3]
+        if kind == "blob" and size.isdigit() and int(size) <= MAX_TEXT:
+            local[sha] = int(size)
+    want = {p: s for p, s in sha_of.items() if s in local}
+    if not want:
+        return {}
+    shas = list(dict.fromkeys(want.values()))
+    try:
+        raw = subprocess.run([*base, "--batch"], input=("\n".join(shas) + "\n").encode(), capture_output=True, env=env,
+                             timeout=600, check=True).stdout
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    blobs, pos = {}, 0
+    for sha in shas:  # each object: "<sha> blob <size>\n<content>\n"
+        nl = raw.index(b"\n", pos)
+        head = raw[pos:nl].decode().split()
+        pos = nl + 1
+        if len(head) < 3 or head[1] != "blob":
+            continue
+        size = int(head[2])
+        body = raw[pos:pos + size]
+        pos += size + 1
+        if b"\0" in body[:8000]:
+            continue  # binary
+        try:
+            blobs[sha] = body.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+    return {p: blobs[s] for p, s in want.items() if s in blobs}
 
 
 def _read(p: Path):

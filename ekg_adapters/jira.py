@@ -51,8 +51,12 @@ def map_jira(g: Graph, d: Path, project_key: str, repo: str):
             accounts[key] = g.rec("Account", "jira", key, {"login": user.get("name") or key, "display_name": name or None,
                                   "status": None if not user else ("active" if user.get("active") else "deactivated"),
                                   "is_bot": name.endswith(" Bot"), "tool": "jira"}, scope)
-        elif user and not accounts[key]["props"].get("display_name"):
-            accounts[key]["props"]["display_name"] = user.get("displayName")
+        elif user:  # first seen by key only: fill in what the full user gives
+            p = accounts[key]["props"]
+            if not p.get("display_name"):
+                p["display_name"] = user.get("displayName")
+            if user.get("name") and p.get("login") == key:
+                p["login"] = user["name"]
         return accounts[key]
 
     releases = {}
@@ -68,6 +72,29 @@ def map_jira(g: Graph, d: Path, project_key: str, repo: str):
             labels[(name, kind)] = g.rec("Label", "jira", f"{kind}:{name}", {"name": name, "kind": kind}, scope)
         return labels[(name, kind)]
 
+    # the tracker project itself: key, name, type, lead
+    project = None
+    if (d / "jira/project.json").exists():
+        pj = J(d / "jira/project.json")
+        project = g.rec("Project", "jira", pj.get("key") or project_key, {
+            "name": pj.get("name") or project_key, "kind": pj.get("projectTypeKey") or "project",
+            "text": f"Jira project {pj.get('key') or project_key} ({pj.get('name')}): {pj.get('description') or ''}".strip()},
+            scope)
+        g.link("IN", team, project, "field")
+        if pj.get("lead"):
+            g.link("LED_BY", project, account(pj["lead"]), "field", role="lead")
+
+    # every component the project defines, not only those a downloaded ticket uses, with its lead
+    if (d / "jira/components.json").exists():
+        for c in J(d / "jira/components.json"):
+            if c.get("name") and not c.get("deleted") in (True, "True", "true"):
+                comp = label(c["name"], "component")
+                g.notes["jira: components defined by the project"] += 1
+                if project:
+                    g.link("IN", comp, project, "field")
+                if c.get("lead") and c["lead"].get("key"):
+                    g.link("LED_BY", comp, account(c["lead"]), "field", role="lead")
+
     tickets = g.ctx.setdefault("tickets", {})
     for p in sorted((d / "jira/issues").glob("*.json")):
         for i in J(p)["issues"]:
@@ -78,9 +105,12 @@ def map_jira(g: Graph, d: Path, project_key: str, repo: str):
                 "kind": re.sub(r"[^a-z]+", "_", f["issuetype"]["name"].lower()),
                 "priority": (f.get("priority") or {}).get("name"), "created_at": created,
                 "resolution": (f.get("resolution") or {}).get("name"), "resolved_at": utc(f.get("resolutiondate")),
-                "due_at": day(f.get("duedate")), "due_at_precision": "day" if f.get("duedate") else None}, scope)
+                "due_at": day(f.get("duedate")), "due_at_precision": "day" if f.get("duedate") else None,
+                "watch_count": (f.get("watches") or {}).get("watchCount")}, scope)
             tickets[i["key"]] = t
             g.link("IN", t, team, "field", valid_from=created)
+            if project:  # the tracker project the ticket belongs to (its key prefix)
+                g.link("IN", t, project, "field", valid_from=created)
             if f.get("creator"):
                 g.link("CREATED_BY", t, account(f["creator"]), "field", role="creator", at=created)
             if f.get("reporter") and f["reporter"].get("key") != (f.get("creator") or {}).get("key"):
@@ -116,16 +146,31 @@ def map_jira(g: Graph, d: Path, project_key: str, repo: str):
                 g.link("HAS_LABEL", t, label(c["name"], "component"), "field")
             for name in f.get("labels") or []:
                 g.link("HAS_LABEL", t, label(name, "label"), "field")
+            for a in f.get("attachment") or []:  # files attached to the ticket
+                at = utc(a.get("created"))
+                att = g.rec("Attachment", "jira", a["id"], {"title": a.get("filename"), "kind": "file", "created_at": at,
+                            "url": a.get("content")}, scope, acl_from=t)
+                g.link("HAS_ATTACHMENT", t, att, "field", valid_from=at)
+                if a.get("author"):
+                    g.link("CREATED_BY", att, account(a["author"]), "field", role="uploader", at=at)
             if f.get("resolution") and f["resolution"]["name"] in NON_FIX:
                 g.notes[f"jira: done as '{NON_FIX[f['resolution']['name']]}' by resolution (state type stays completed)"] += 1
 
-            # ---- links between tickets (outward side only; the inward side is the other issue's copy)
+            # ---- links between tickets (outward side only; the inward side is the other issue's copy), dated by the
+            # changelog entry that added them when there is one (who added it is that entry's Activity actor)
+            linked_at, linked_by = {}, {}
+            for h in histories:
+                for it in h["items"]:
+                    if it["field"] == "Link" and it.get("to"):
+                        linked_at[it["to"]] = utc(h["created"])
+                        linked_by[it["to"]] = (h.get("author") or {}).get("displayName")
             for lk in f.get("issuelinks") or []:
                 other = lk.get("outwardIssue")
                 if not other:
                     continue
                 ltype, kind = LINK_TYPES.get(lk["type"]["name"], ("RELATED_TO", lk["type"]["outward"].replace(" ", "_")))
-                g.ref(t, ltype, "Ticket", other["key"], "field", stub=True, kind=kind, valid_from=None)
+                g.ref(t, ltype, "Ticket", other["key"], "field", stub=True, kind=kind, valid_from=linked_at.get(other["key"]),
+                      link_name=lk["type"].get("name"), added_by=linked_by.get(other["key"]))
             if f.get("parent"):
                 g.ref(t, "CHILD_OF", "Ticket", f["parent"]["key"], "field", stub=True)
 

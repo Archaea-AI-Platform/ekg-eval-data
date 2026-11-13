@@ -85,15 +85,26 @@ class _Sections(HTMLParser):
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.sections, self.level, self.heading, self.buf, self.in_h = [], 0, "", [], None
+        self.href, self.anchor_at = None, 0
 
     def handle_starttag(self, tag, attrs):
+        a = dict(attrs)
         if re.fullmatch(r"h[1-6]", tag):
             self._flush()
             self.in_h, self.heading = int(tag[1]), ""
         elif tag in ("p", "li", "tr", "br", "div"):
             self.buf.append("\n")
+        elif tag == "a" and a.get("href"):  # keep where a link points, not only its words
+            self.href, self.anchor_at = a["href"], len(self.buf)
+        elif tag == "ri:url" and a.get("ri:value"):  # a Confluence external link
+            self.buf.append(f" <{a['ri:value']}>")
 
     def handle_endtag(self, tag):
+        if tag == "a" and self.href:
+            words = "".join(self.buf[self.anchor_at:])
+            if self.href not in words and not self.href.startswith("#"):
+                self.buf.append(f" <{self.href}>")
+            self.href = None
         if self.in_h and tag == f"h{self.in_h}":
             self.level, self.in_h = self.in_h, None
 
@@ -119,6 +130,88 @@ def xhtml_sections(body):
     p.feed(body or "")
     p.close()
     return p.sections
+
+
+GIT_READ = ["-c", "core.quotePath=false", "-c", "gc.auto=0", "-c", "maintenance.auto=false"]  # never repack
+
+
+def _git(d, *args):
+    """A read-only git command on the download's blobless repo.git, never fetching (or "" when there is none)."""
+    import os
+    import subprocess
+    repo = d / "git" / "repo.git"
+    if not repo.is_dir():
+        return ""
+    try:
+        return subprocess.run(["git", "--git-dir", str(repo), *GIT_READ, *args], check=True, capture_output=True,
+                              env={**os.environ, "GIT_NO_LAZY_FETCH": "1"}, timeout=600).stdout.decode("utf-8", "replace")
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def repo_tags(d) -> dict:
+    """Tag name -> {date (tagger date, else the commit's), sha (the commit it points to)}, from repo.git."""
+    out = {}
+    fmt = "%(refname:short)%09%(taggerdate:iso-strict)%09%(*objectname)%09%(objectname)%09%(committerdate:iso-strict)"
+    for line in _git(d, "for-each-ref", "refs/tags", f"--format={fmt}").splitlines():
+        name, tdate, peeled, obj, cdate = (line.split("\t") + [""] * 5)[:5]
+        out[name] = {"date": tdate or cdate or None, "sha": peeled or obj}
+    return out
+
+
+def repo_commits(d, shas) -> list:
+    """Commits by sha from repo.git (message, people, dates; no file lists), in this kit's commit shape."""
+    start, sep, end = "\x1e", "\x1f", "\x1d"
+    fmt = start + sep.join(["%H", "%P", "%an", "%ae", "%aI", "%cn", "%ce", "%cI", "%B"]) + end
+    rows, shas = [], list(shas)
+    for k in range(0, len(shas), 200):
+        text = _git(d, "log", "--no-walk", f"--format={fmt}", *shas[k:k + 200])
+        for rec in text.split(start)[1:]:
+            f = rec.split(end)[0].split(sep)
+            if len(f) >= 9:
+                rows.append({"sha": f[0], "parents": f[1].split(), "author_name": f[2], "author_email": f[3],
+                             "authored_at": f[4], "committer_name": f[5], "committer_email": f[6], "committed_at": f[7],
+                             "message": f[8].rstrip("\n"), "files": []})
+    return rows
+
+
+def release_branch_commits(d, skip, since="2024-01-01", default="trunk") -> list:
+    """Commits on the release branches (refs named like 4.3) that the default branch does not have (cherry-picks,
+    version bumps), each with _branch set to the first release branch that holds it. Read from repo.git, no fetch."""
+    names = [n for n in _git(d, "for-each-ref", "--format=%(refname:short)", "refs/heads").split()
+             if re.fullmatch(r"\d+\.\d+", n)]
+    names.sort(key=lambda n: tuple(int(x) for x in n.split(".")))
+    first = {}
+    for n in names:
+        for sha in _git(d, "rev-list", f"--since={since}", f"refs/heads/{n}", f"^refs/heads/{default}").split():
+            if sha not in skip:
+                first.setdefault(sha, n)
+    rows = repo_commits(d, list(first))
+    for c in rows:
+        c["_branch"] = first.get(c["sha"])
+    return rows
+
+
+def first_tags(d, shas) -> dict:
+    """sha -> the earliest tag that contains it (git describe --contains), for the commits a tag reaches."""
+    import os
+    import subprocess
+    repo = d / "git" / "repo.git"
+    shas = list(shas)
+    if not repo.is_dir() or not shas:
+        return {}
+    try:
+        out = subprocess.run(["git", "--git-dir", str(repo), *GIT_READ, "name-rev", "--tags", "--name-only",
+                              "--annotate-stdin"], input="\n".join(shas).encode() + b"\n", capture_output=True,
+                             env={**os.environ, "GIT_NO_LAZY_FETCH": "1"}, timeout=1200, check=True).stdout.decode()
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    tags = {}
+    for sha, name in zip(shas, out.splitlines()):
+        name = name.strip()
+        if name and name != sha and not name.startswith("undefined"):
+            tags[sha] = re.sub(r"[~^].*$", "", name.removeprefix("tags/"))
+    return tags
 
 
 def xhtml_text(body):

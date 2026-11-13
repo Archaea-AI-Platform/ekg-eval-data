@@ -258,6 +258,11 @@ def commit_pr(v):
     for c in v.typed("Commit"):
         if any(lk["type"] == "MERGED_AS" for lk in v.inn[c["id"]]):  # stub PRs count: the link exists
             continue
+        # only commits on the default branch land a PR; a PR's own branch commits (CONTAINS) and release-branch
+        # commits are not merge results, so asking which PR merged them is the wrong question
+        if not c["props"].get("on_default_branch") or any(lk["type"] == "CONTAINS" for lk in v.inn[c["id"]]):
+            skipped["not a default-branch commit (a PR's own commit, or another branch)"] += 1
+            continue
         msg = c["props"].get("message") or ""
         cands = _ordered(i for k in key_rx.findall(msg) for i in sorted(by_ticket.get(k, ())))
         cands += sim.top(_first_line(msg), exclude=set(cands))

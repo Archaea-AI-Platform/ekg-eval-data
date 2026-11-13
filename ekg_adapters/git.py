@@ -24,7 +24,7 @@ import re
 from pathlib import Path
 
 from .access import place
-from .common import Graph, file_props, ticket_rx, utc
+from .common import Graph, file_props, first_tags, release_branch_commits, repo_commits, ticket_rx, utc
 
 NOREPLY = re.compile(r"^(\d+)\+([^@]+)@users\.noreply\.github\.com$")
 PRNUM = re.compile(r"\(#(\d+)\)\s*$")
@@ -119,13 +119,33 @@ def map_git(g: Graph, d: Path):
             g.notes["git: unreadable commit row skipped"] += 1
             continue
         rows.append(c)
+    # commits a release tag points to that are not on the default branch (a release branch's head): read from
+    # repo.git, so "which tag" questions land on a real commit
+    on_trunk = {c["sha"] for c in rows}
+    extra = repo_commits(d, sorted(set(g.ctx.get("tag_targets", ())) - on_trunk))
+    for c in extra:
+        c["_off_trunk"] = True
+    rows += extra
+    g.notes["git: commits release tags point to, off the default branch"] = len(extra)
+    # commits on the release branches that the default branch does not have (cherry-picks, version bumps)
+    released = release_branch_commits(d, on_trunk | {c["sha"] for c in extra}, s.get("release_branch_since", "2024-01-01"),
+                                      branch)
+    for c in released:
+        c["_off_trunk"] = True
+    rows += released
+    g.notes["git: release-branch commits not on the default branch"] = len(released)
+    tag_of = first_tags(d, [c["sha"] for c in rows])  # the earliest tag holding each commit
+    g.notes["git: commits with the first tag that contains them"] = len(tag_of)
+    picked = []  # (release-branch commit, the PR its subject names): linked to that PR's trunk commit below
     for c in rows:
         authored, committed = utc(c["authored_at"]), utc(c["committed_at"])
         off = re.search(r"([+-])(\d\d):?(\d\d)$", c["authored_at"] or "")
         co = re.findall(r"^Co-authored-by: (.+?) <([^>]+)>$", c["message"], re.M)
         commit = g.rec("Commit", "git", c["sha"], {
             "sha": c["sha"], "message": c["message"], "authored_at": authored, "committed_at": committed,
-            "on_default_branch": True, "branch": branch, "co_authors": [f"{n} <{e}>" for n, e in co] or None,
+            "on_default_branch": not c.get("_off_trunk"),
+            "branch": c.get("_branch") or (None if c.get("_off_trunk") else branch), "first_tag": tag_of.get(c["sha"]),
+            "co_authors": [f"{n} <{e}>" for n, e in co] or None,
             "author_tz_offset": (1 if off.group(1) == "+" else -1) * (int(off.group(2)) * 60 + int(off.group(3))) if off else None,
         }, scope, acl_from=repo)
         commits[c["sha"]] = commit
@@ -153,7 +173,9 @@ def map_git(g: Graph, d: Path):
         subject = c["message"].split("\n")[0]
         m = PRNUM.search(subject)
         pr_num = int(m.group(1)) if m else None
-        if pr_num:
+        if pr_num and c.get("_off_trunk"):  # a copy on a release branch: the PR merged as its trunk commit
+            picked.append((commit, pr_num))
+        elif pr_num:
             g.ref(commit, "MERGED_AS", "PullRequest", pr_num, "convention", 0.95, stub=True, reverse=True,
                   role="merge_result", valid_from=committed)
         for k in sorted(set(key_rx.findall(subject))):
@@ -173,4 +195,14 @@ def map_git(g: Graph, d: Path):
         for pos, parent in enumerate(c["parents"]):
             if parent in commits:
                 g.link("PARENT", commits[c["sha"]], commits[parent], "field", position=pos)
+    trunk_by_pr = {}
+    for c in rows:
+        if not c.get("_off_trunk"):
+            m = PRNUM.search(c["message"].split("\n")[0])
+            if m:
+                trunk_by_pr.setdefault(int(m.group(1)), commits[c["sha"]])
+    for commit, num in picked:
+        if num in trunk_by_pr:
+            g.link("CHERRY_PICKED_FROM", commit, trunk_by_pr[num], "convention", 0.9, kind="cherry_pick")  # same PR
+    g.notes["git: release-branch commits linked to their trunk original (same PR)"] = sum(n in trunk_by_pr for _, n in picked)
     g.ctx["git_emails"] = emails

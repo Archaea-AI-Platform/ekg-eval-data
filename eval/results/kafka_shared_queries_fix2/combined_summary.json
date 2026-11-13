@@ -1,0 +1,40 @@
+{
+ "questions": 119,
+ "passed": 96,
+ "passed_without_judge_fallback": 88,
+ "judge_fallback_passes": [
+  "COV-001",
+  "COV-031",
+  "DOC-011",
+  "KNW-051",
+  "SGA-006",
+  "SGA-015",
+  "SGA-016",
+  "XPP-005"
+ ],
+ "failed": [
+  "CNV-031",
+  "COD-037",
+  "COD-059",
+  "COD-061",
+  "COV-007",
+  "COV-016",
+  "COV-019",
+  "COV-028",
+  "COV-038",
+  "COV-045",
+  "COV-047",
+  "DOC-016",
+  "DOC-044",
+  "DOC-061",
+  "KNW-017",
+  "KNW-045",
+  "KNW-050",
+  "PEO-059",
+  "SHB-032",
+  "TIK-065",
+  "XPC-025",
+  "XPD-038",
+  "XPP-045"
+ ]
+}

@@ -32,12 +32,16 @@ DEFAULTS = {
     "issue_tracker": None,        # "github" when tickets are GitHub issues: #N in text may name an issue
     "infer_people": "auto",       # people from commit and mail authorship: "auto" = only when there is no directory
     "public": True,               # the sources are public (granted to the Public principal)
+    # "+1 (binding)" votes and tallies in [VOTE] threads about a decision key (Apache-style consensus); off elsewhere
+    "vote_threads": False,
+    # a regex for a message that withdraws an announced acceptance; None: the built-in English phrases
+    "withdrawal_phrases": None,
 }
 PRESETS = {
-    "kafka": {"default_branch": "trunk", "decision_prefix": "KIP"},
-    "flink": {"default_branch": "master", "decision_prefix": "FLIP"},
-    "spark": {"default_branch": "master", "decision_prefix": "SPIP"},
-    "tvm": {"default_branch": "main", "decision_prefix": "RFC", "issue_tracker": "github"},
+    "kafka": {"default_branch": "trunk", "decision_prefix": "KIP", "vote_threads": True},
+    "flink": {"default_branch": "master", "decision_prefix": "FLIP", "vote_threads": True},
+    "spark": {"default_branch": "master", "decision_prefix": "SPIP", "vote_threads": True},
+    "tvm": {"default_branch": "main", "decision_prefix": "RFC", "issue_tracker": "github", "vote_threads": True},
 }
 
 # folder -> (files the adapter reads, fields each JSON(L) row needs, the manifest keys it needs)

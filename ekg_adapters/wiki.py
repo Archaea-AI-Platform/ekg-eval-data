@@ -67,10 +67,12 @@ def map_wiki(g: Graph, d: Path):
 
         # sections of the current version, as Pieces
         for order, (level, heading, text) in enumerate(xhtml_sections(p["body"]["storage"]["value"])):
-            if not text:
+            if not text and not heading:
                 continue
-            piece = g.rec("Piece", "confluence", f"{p['id']}:v{p['version']['number']}:{order}", {"text": text,
-                          "kind": "section", "heading": heading or None, "order": order,
+            # kind is the heading level (h1, h2 ...; "lead" before the first heading); a heading with no text of its
+            # own is kept, so the page's outline is complete
+            piece = g.rec("Piece", "confluence", f"{p['id']}:v{p['version']['number']}:{order}", {"text": text or None,
+                          "kind": f"h{level}" if level else "lead", "heading": heading or None, "order": order,
                           "created_at": utc(p["version"]["when"])}, scope, acl_from=doc)
             g.link("PART_OF", piece, doc, "field", order=order)
             g.link("OF_VERSION", piece, current, "field")
@@ -134,6 +136,9 @@ def _decision(g, p, doc, kip, key_rx, scope, decisions):
                 "identifier": m.group(1) if m else None, "title": (m.group(2) if m else p["title"]) or None,
                 "status": status if status in DECISION_STATUSES else None}, scope)
     decisions[kip] = dec
+    tally = g.ctx.get("kip_tally", {}).get(int(kip)) if str(kip).isdigit() else None
+    if tally:  # the vote result its [VOTE] thread states
+        dec["props"].update({k: v for k, v in tally.items() if k != "at"})
     # where it was made: the KIP page itself (written), and its discussion thread when the link names a message
     g.link("MADE_IN", dec, doc, "text_rule", 0.95, evidence=[doc], at=utc(p["history"]["createdDate"]))
     for mid in MBOX_MSGID.findall(body):

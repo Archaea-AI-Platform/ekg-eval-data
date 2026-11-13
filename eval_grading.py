@@ -71,8 +71,19 @@ def _norm(s: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[*`_\"'“”‘’]", "", s)).strip().lower()
 
 
+_REF = re.compile(r"\b(?:pr|pull request)\s*[-#:]?\s*#?(\d{2,7})\b", re.I)
+
+
+def _refs(s: str) -> str:
+    """'PR 20011', 'PR-20011', 'pull request #20011' -> '#20011' (the same reference, however it is written)."""
+    return _REF.sub(lambda m: f"#{m.group(1)}", s)
+
+
 def _has(answer: str, phrase: str) -> bool:
-    a, p = _norm(answer), _norm(phrase)
+    a, p = _norm(_refs(answer)), _norm(_refs(phrase))
+    items = [x.strip() for x in re.split(r"\s*[,;]\s*", p) if x.strip()]
+    if len(items) > 1 and all(len(x) > 2 for x in items) and p not in a:  # a list: every item, in any order
+        return all(_has(answer, x) for x in items)
     if not p:
         return False
     if re.fullmatch(r"-?\d+(\.\d+)?", p):
@@ -119,8 +130,12 @@ async def grade(q: dict, answer: str, judge=None) -> dict:
         return {**out, "pass": not missing and bool(answer.strip()) and not bad, "method": "rules", "missing": missing}
     if q["grading"] == "script" and q["variants"] and q["behavior"] != "abstain":
         hit = [v for v in q["variants"] if _has(answer, v)]
-        return {**out, "pass": bool(hit) and not bad, "method": "script", "matched": hit,
-                "missing": [] if hit else [f"one of: {q['variants']}"]}
+        if hit or judge is None or not q["checklist"] or bad:
+            return {**out, "pass": bool(hit) and not bad, "method": "script", "matched": hit,
+                    "missing": [] if hit else [f"one of: {q['variants']}"]}
+        # no variant string matched: the judge reads it against the question's required facts (reported apart)
+        res = await grade({**q, "grading": "judge"}, answer, judge)
+        return {**res, "method": "script->judge", "script_missing": [f"one of: {q['variants']}"]}
     if judge is None:
         return {**out, "pass": None, "method": "judge (not run)", "missing": []}
     try:
