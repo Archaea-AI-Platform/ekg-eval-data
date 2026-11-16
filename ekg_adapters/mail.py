@@ -13,6 +13,8 @@ Classifies each message, with the senders and patterns from the project's settin
     decision was made (MADE_IN), as is a vote thread's result message
   - an announcement (settings.announce_subject, e.g. "[ANNOUNCE] ...") whose subject names a release's version
     ANNOUNCES that Release
+  - a person's message whose subject or own text names a Group by its whole name MENTIONS it (link_named_groups,
+    once every adapter has made its groups)
 A message that can't be read is skipped and counted with its reason; one without a Message-ID gets a
 stable generated one. The same message twice in one list is kept once; in two lists it is one message
 IN both. A sender the list rewrote to "Name via list" gets a FROM link (method inferred, kind relayed) only when
@@ -313,6 +315,7 @@ def _one(g, m, folder, s, lists, messages, addresses, threads, decided, in_list,
     for k in sorted(subject_keys):
         g.ref(msg, "DISCUSSES", "Ticket", k, "text_rule", 0.9, kind="discuss", at=sent)
     quoted = "\n".join(line for line in body.splitlines() if not line.lstrip().startswith(">"))  # not the quoted reply
+    g.ctx.setdefault("mail_texts", []).append((msg, f"{subject}\n{quoted}", sent))  # for link_named_groups
     for k in sorted(set(key_rx.findall(quoted)) - subject_keys):
         g.ref(msg, "MENTIONS", "Ticket", k, "text_rule", 0.8, kind="key", at=sent)
     for r, what, num in set(GH_URL.findall(quoted)):
@@ -454,3 +457,31 @@ def _acceptance(g, msg, proposal, text, voter, sent):
               reason=line[:300])
         state["withdrawn"] = g.refs[-1][7]  # the queued link's own fields: valid_to is set if it is accepted again
         g.notes["mail: proposal acceptances withdrawn in the vote thread (Decision REVERSES)"] += 1
+
+
+def link_named_groups(g):
+    """A person's message whose subject or own (unquoted) text names a Group of the graph by its whole name ("New
+    <team name> member", "on behalf of the <committee name>") MENTIONS that group (kind name). Runs once every
+    adapter has made its groups. The schema's LINKS_TO is a hyperlink or address; a name written in text is a
+    mention. Only names of two or more words are read: a one-word group name (a project key, "Payments") is an
+    ordinary word in mail and cannot be told apart from it. A name that several groups share is counted, not linked."""
+    texts = g.ctx.pop("mail_texts", [])
+    by_name = {}
+    for r in g.records.values():
+        if r["type"] == "Group" and not r["props"].get("_stub"):
+            name = " ".join(str(r["props"].get("name") or "").split())
+            if len(name.split()) >= 2:
+                by_name.setdefault(name.casefold(), []).append(r)
+    if not texts or not by_name:
+        return
+    names = sorted(by_name, key=len, reverse=True)  # the longer name first: "<org> <team>" before "<team>"
+    rx = re.compile(r"(?<![\w-])(" + "|".join(r"\s+".join(map(re.escape, n.split())) for n in names) + r")(?![\w-])",
+                    re.I)
+    for msg, text, sent in texts:
+        for name in sorted({" ".join(m.split()).casefold() for m in rx.findall(text)}):
+            groups = by_name.get(name, [])
+            if len(groups) != 1:
+                g.notes["mail: group names several groups share (not linked)"] += 1
+                continue
+            g.link("MENTIONS", msg, groups[0], "text_rule", 0.7, evidence=[msg], kind="name", at=sent)
+            g.notes["mail: messages naming a group (MENTIONS the Group)"] += 1

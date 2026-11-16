@@ -344,3 +344,43 @@ def _chair_terms(g, d, persons, by_name, chair, scope, tool, display) -> dict:
                        evidence=[dec])
     g.notes["people: chair resolutions read from the board minutes"] = len(events)
     return terms
+
+
+def owned_domains(s: dict) -> list:
+    """The email domains the tenant owns, from the settings (owned_email_domains, else directory_email_domain)."""
+    own = s.get("owned_email_domains")
+    if own is None:
+        own = [s["directory_email_domain"]] if s.get("directory_email_domain") else []
+    return sorted({str(x).strip().lower().lstrip("@") for x in ([own] if isinstance(own, str) else own) if x})
+
+
+def link_domains(g: Graph):
+    """Each address on a domain the tenant owns (one of the settings' owned domains, or a sub-domain of one) is
+    MEMBER_OF that exact domain's Domain record: a person's address and a mailing list's own address alike. A
+    MailingList cannot itself be MEMBER_OF a Domain in the schema (its address is a field), so a list on an owned
+    domain gets the EmailAddress of its own address, which carries the link. Runs after every adapter."""
+    s = g.ctx.get("settings") or {}
+    owned = owned_domains(s)
+    if not owned:
+        return
+    on_owned = lambda dom: any(dom == o or dom.endswith("." + o) for o in owned)
+    scope = (g.ctx.get("scope_by_tool") or {}).get(s.get("directory_tool") or "directory")
+    if scope is None:
+        scope, _ = place(g, "ekg", "email_domains", common.TENANT, public=s.get("public", True))
+    addresses = {r["props"]["address"]: r for r in list(g.records.values())
+                 if r["type"] == "EmailAddress" and "@" in str(r["props"].get("address") or "")}
+    for lst in [r for r in g.records.values() if r["type"] == "MailingList"]:
+        addr = str(lst["props"].get("address") or "").lower()
+        if "@" in addr and addr not in addresses and on_owned(addr.rsplit("@", 1)[1]):
+            addresses[addr] = g.rec("EmailAddress", "email", addr, {"address": addr, "normalized_value": addr}, lst["scope"])
+            g.notes["domains: list addresses given their EmailAddress (for the Domain link)"] += 1
+    domains = {}
+    for addr, rec in sorted(addresses.items()):
+        dom = addr.rsplit("@", 1)[1].lower()
+        if not on_owned(dom):
+            continue
+        if dom not in domains:
+            domains[dom] = g.rec("Domain", "ekg", dom, {"domain": dom}, scope)
+        g.link("MEMBER_OF", rec, domains[dom], "field", role="member")
+        g.notes["domains: addresses on an owned domain (MEMBER_OF its Domain)"] += 1
+    g.notes["domains: Domain records"] = len(domains)

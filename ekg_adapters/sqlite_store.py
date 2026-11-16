@@ -202,7 +202,7 @@ def _rows(path):
 
 def save(graph, query_master: Path, db_path: Path | None = None, log=print):
     """One graph folder, or several: each folder's records/links.jsonl (adapters), overlaid with its llm/
-    (LLM stage) -> one SQLite file.
+    (LLM stage) and derived/ (links read in code from the LLM stage's records) -> one SQLite file.
 
     Several folders make one combined graph. Record ids come from the tenant and the source's own key, so
     the same person, address or ticket built from two downloads is one row, and a stub one download left for
@@ -219,6 +219,8 @@ def save(graph, query_master: Path, db_path: Path | None = None, log=print):
         name = gp.name if len(graphs) > 1 else ""
         stages[f"{name}:adapters".lstrip(":")] = (_rows(gp / "records.jsonl"), _rows(gp / "links.jsonl"))
         stages[f"{name}:llm".lstrip(":")] = (_rows(gp / "llm" / "records.jsonl"), _rows(gp / "llm" / "links.jsonl"))
+        # links derived in code from the model stage's records (code_refs.derive), when it ran
+        stages[f"{name}:derived".lstrip(":")] = (_rows(gp / "derived" / "records.jsonl"), _rows(gp / "derived" / "links.jsonl"))
     records, stage_of, observed_of = {}, {}, {}
     merged = collections.Counter()
     for stage, (recs, lks) in stages.items():
@@ -293,7 +295,8 @@ def save(graph, query_master: Path, db_path: Path | None = None, log=print):
                 "built_at": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "observed_at": observed,
                 "records_by_stage": dict(report["records"]), "links_by_stage": dict(report["links"]),
                 "invalid_skipped": dict(report["invalid"]), "indexes_skipped": skipped,
-                "stages": "adapters = method field..convention/inferred; llm = method llm_judge, source_tool derived"}
+                "stages": "adapters = method field..convention/inferred; llm = method llm_judge, source_tool derived; "
+                          "derived = links read in code from the llm stage's records (method text_rule)"}
         insert("_eval_meta", [{"key": k, "value": v if isinstance(v, str) else json.dumps(v)} for k, v in meta.items()])
     con.execute("PRAGMA optimize")
     con.close()

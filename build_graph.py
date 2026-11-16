@@ -10,6 +10,7 @@ with query-master's validator) and a report. Exit code 1 if anything fails valid
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -27,13 +28,14 @@ def main() -> int:
     ap.add_argument("--no-write", action="store_true", help="validate and report only")
     ap.add_argument("--raw-check", action="store_true", help="also validate the raw JSON as-is (expected to fail)")
     ap.add_argument("--json", default=None, help="also write the report as JSON to this path")
+    ap.add_argument("--workers", type=int, default=os.cpu_count() or 1, help="processes that parse source files for code symbols")
     args = ap.parse_args()
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
     data = Path(args.data)
     out = None if args.no_write else Path(args.out or HERE.parent / "ekg-eval-out" / data.name)
     print(f"Building the graph from {data}")
-    report = run(data, Path(args.query_master), out, args.raw_check)
+    report = run(data, Path(args.query_master), out, args.raw_check, workers=args.workers)
 
     t = report["totals"]
     if report["raw"]:

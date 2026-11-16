@@ -52,6 +52,9 @@ DEFAULTS = {
     "directory_link_method": None,
     "directory_email_domain": None,  # a roster that lists ids only: each id's address is <id>@<this domain>
     "directory_login_tools": [],     # tools people sign in to with their directory id (login == the directory's id)
+    # the email domains the tenant owns (admin settings): each, and each sub-domain of one that an address in the
+    # graph uses, is a Domain its addresses are MEMBER_OF. None: directory_email_domain, when that is set
+    "owned_email_domains": None,
 }
 # An organisation's conventions, shared by its projects. folder_prefix: a dataset folder named
 # <prefix><project> belongs to the family (and takes its tenant) when the manifest does not say.

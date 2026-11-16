@@ -121,7 +121,7 @@ def map_code(g: Graph, d: Path):
                     sources[path] = p.read_text(encoding="utf-8") if p.is_file() else text
                 except (UnicodeDecodeError, OSError):
                     sources[path] = text
-    map_symbols(g, repo, scope, rid, files, sources)
+    map_symbols(g, repo, scope, rid, files, sources, g.ctx.get("parse_workers") or 0)
     g.notes["code: files in the tree"] = len(listing)
     g.notes["code: folders in the tree"] = len(folders)
     texts_all = dict(texts) if listing and all(a is None for _, a in listing) else {}

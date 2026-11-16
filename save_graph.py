@@ -1,4 +1,5 @@
-"""Save a graph (adapters' records/links.jsonl, plus the LLM stage's <graph>/llm/ when present) as SQLite in
+"""Save a graph (adapters' records/links.jsonl, plus the LLM stage's <graph>/llm/ when present, plus the links read
+in code from that stage's records, written to <graph>/derived/ first) as SQLite in
 query-master's storage shape: ekg_registry_types, ekg_registry_links, ekg_records, ekg_links.
 
     python -I ekg-eval-data/save_graph.py                                  # -> ekg-eval-out/apache-kafka/graph.sqlite
@@ -18,6 +19,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
+from ekg_adapters.code_refs import derive  # noqa: E402
 from ekg_adapters.sqlite_store import save  # noqa: E402
 
 
@@ -27,9 +29,13 @@ def main() -> int:
                     help="one or more build_graph.py output folders")
     ap.add_argument("--query-master", default=str(HERE.parent / "query-master"), help="query-master checkout")
     ap.add_argument("--sqlite", default=None, help="output file (default <graph>/graph.sqlite; required for several)")
+    ap.add_argument("--no-derive", action="store_true", help="keep each graph's derived/ links as they are")
     args = ap.parse_args()
     if len(args.graph) > 1 and not args.sqlite:
         ap.error("several --graph folders need --sqlite")
+    if not args.no_derive:   # code named in the model stage's knowledge items -> EXPLAINS (no model call)
+        for gp in args.graph:
+            derive(Path(gp), Path(args.query_master))
     report = save([Path(x) for x in args.graph], Path(args.query_master), Path(args.sqlite) if args.sqlite else None)
     print(json.dumps(report, indent=1, ensure_ascii=False))
     return 1 if report["invalid_skipped"] else 0

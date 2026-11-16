@@ -19,7 +19,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-from ekg_adapters import fill, pipeline, sqlite_store  # noqa: E402
+from ekg_adapters import code_refs, fill, pipeline, sqlite_store  # noqa: E402
 from ekg_adapters.fill_tasks import BUILDERS, DEFAULT_KINDS  # noqa: E402
 
 
@@ -74,7 +74,8 @@ def one(data, out, qm, args) -> int:
         for k, r in res["kinds"].items():
             print(f"   {k:<16} to ask {r['to_ask']:>6,}  accepted {r.get('accepted', 0):>6,}  rejected {r.get('rejected', 0):>6,}  "
                   f"error {r.get('error', 0):>4,}  prompt chars {r.get('prompt_chars_total', 0):>12,}")
-    print("3. save")
+    print("3. save (after the links read in code from the model stage's records)")
+    code_refs.derive(out, qm, log=lambda m: print(f"  {m.strip()}"))
     saved = sqlite_store.save(out, qm)
     print(f"   {saved['sqlite']} ({saved['size_mb']} MB) records {saved['records_by_stage']} links {saved['links_by_stage']}")
     return 1 if saved["invalid_skipped"] or t["records"] != t["records_valid"] or t["links"] != t["links_valid"] else 0

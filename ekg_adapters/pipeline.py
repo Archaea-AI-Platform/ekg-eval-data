@@ -23,8 +23,8 @@ from .identity import resolve_identity
 from .jira import map_jira
 from .linear import map_linear
 from .linker import resolve
-from .mail import map_mail
-from .people import map_people
+from .mail import link_named_groups, map_mail
+from .people import link_domains, map_people
 from .slack import map_slack
 from .wiki import map_wiki
 from .code import map_code
@@ -133,8 +133,9 @@ ADAPTERS = [  # (source folder, step name, function, extra args from the manifes
 ]
 
 
-def run(data: Path, query_master: Path, out: Path | None = None, raw_check: bool = False, log=print):
-    """Run every adapter whose source folder is present in `data`, then link, resolve identity and validate."""
+def run(data: Path, query_master: Path, out: Path | None = None, raw_check: bool = False, log=print, workers: int = 0):
+    """Run every adapter whose source folder is present in `data`, then link, resolve identity and validate.
+    workers > 1 parses source files for code symbols in that many processes."""
     common.bind(query_master)
     manifest, manifest_notes = load_manifest(data)
     common.set_tenant(manifest["tenant"], manifest.get("id_secret"))
@@ -143,6 +144,7 @@ def run(data: Path, query_master: Path, out: Path | None = None, raw_check: bool
     g.ctx["slack_workspace_name"] = manifest.get("slack_workspace")
     g.ctx["source_urls"] = manifest.get("sources") or {}  # each tool's address (the wiki host for its page links)
     g.ctx["settings"] = settings = project_settings(manifest, data)
+    g.ctx["parse_workers"] = workers
     timings, t0 = {}, time.time()
     for n in manifest_notes:
         log(f"  note: {n}")
@@ -173,8 +175,10 @@ def run(data: Path, query_master: Path, out: Path | None = None, raw_check: bool
         except Exception as e:  # one adapter's failure is reported, and the others still run
             adapters[folder] = {"status": "failed", "why": f"{type(e).__name__}: {e}"[:300]}
             log(f"  {name}: FAILED ({adapters[folder]['why']})")
+    step("group names in mail", link_named_groups, g)
     linked = step("cross-source linker", resolve, g)
     identity = step("identity resolution", resolve_identity, g)
+    step("email domains", link_domains, g)
     step("document owners", docgraph.finish, g)  # front-matter owners need the Persons identity resolution made
     documents = docgraph.report(g)               # how well each document was read (the schema has no place for it)
     cov = coverage(g)
