@@ -1,9 +1,11 @@
 """Per-project settings and the input contract.
 
-Rules that used to be written into the adapters for Kafka (the default branch, which mail senders are
-bots and what they announce, the decision-proposal key) are settings here. Each comes, in order, from
-the dataset's manifest.json, then the project's preset below, then the generic default. Kafka's
-values are the "kafka" preset, so an old Kafka manifest behaves as before.
+Nothing about one project or one organisation is written into the adapters: the default branch, how
+release branches are named, which mail senders are integrations and what their notices look like, the
+decision-proposal key, the tenant, the directory's own tool name. Each is a setting here and comes, in
+order, from the dataset's manifest.json ("settings"), then the project's preset, then the preset's
+family (an organisation whose projects share conventions, e.g. "apache"), then the generic default.
+Kafka's values are the "kafka" preset on the "apache" family, so a Kafka manifest behaves as before.
 
 The input contract (CONTRACT) says, per source folder, which files the adapter reads and which
 fields it needs in them. check_inputs() reads it before the run and reports every missing file,
@@ -19,34 +21,89 @@ from pathlib import Path
 
 DEFAULTS = {
     "default_branch": None,       # None: github/repo.json's default_branch, else "main"
+    # which branch names are release branches (a full-match regex)
+    "release_branches": r"(?:(?:release|releases|rel|branch|stable|maint)[-/_]?)?v?\d+\.\d+(?:\.(?:\d+|x))?",
+    "release_branch_since": None,  # read release-branch commits from this day on; None: the manifest window's start
     "decision_prefix": None,      # proposal keys that are decisions, e.g. "KIP" for KIP-123; None: none
     "mail_lists": {},             # mail/<folder> -> list address; default: the List-Id header, else the folder name
-    # mail senders that are integrations: what they post is a notice about an item, not a new fact
+    # mail senders that are integrations: what they post is a notice about an item, not a new fact.
+    # address -> "tracker" (ANNOUNCES the ticket its subject names), "code_host" (ANNOUNCES the PR or issue
+    # its URL names) or "ci" (noise, counted and not linked)
     "notifiers": {
-        "jira@apache.org": "jira",               # "[jira] [Created] (KEY-1) ..." -> ANNOUNCES the ticket
-        "git@apache.org": "github",              # "URL: https://github.com/<repo>/pull/N" -> ANNOUNCES the PR / issue
-        "notifications@github.com": "github",
-        "builds@apache.org": "ci",               # CI results: noise, counted and not linked
+        "notifications@github.com": "code_host",
     },
-    "ci_subject": r"^\[(GH|CI|BUILD)\]|workflow run|build (failed|fixed|is back)|\bjenkins\b",  # github notices that are CI
+    # a regex whose group 1 is the ticket key in a tracker notice's subject; None: the first known ticket key
+    "tracker_notice_subject": None,
+    "ci_subject": r"^\[(GH|CI|BUILD)\]|workflow run|build (failed|fixed|is back)|\bjenkins\b",  # code-host notices that are CI
     "issue_tracker": None,        # "github" when tickets are GitHub issues: #N in text may name an issue
     "infer_people": "auto",       # people from commit and mail authorship: "auto" = only when there is no directory
     "public": True,               # the sources are public (granted to the Public principal)
-    # "+1 (binding)" votes and tallies in [VOTE] threads about a decision key (Apache-style consensus); off elsewhere
+    # "+1 (binding)" votes and tallies in [VOTE] threads about a decision key (consensus by mail); off elsewhere
     "vote_threads": False,
     # a regex for a message that withdraws an announced acceptance; None: the built-in English phrases
     "withdrawal_phrases": None,
+    # the people directory (people/): the tool name its records carry, the directory's own name (None: the
+    # tenant), and how its account links were made (HAS_ACCOUNT link_method: idp | ldap | csv | admin ...;
+    # None: "csv" for a CSV file, else "admin")
+    "directory_tool": "directory",
+    "directory_name": None,
+    "directory_link_method": None,
+    "directory_email_domain": None,  # a roster that lists ids only: each id's address is <id>@<this domain>
+    "directory_login_tools": [],     # tools people sign in to with their directory id (login == the directory's id)
+}
+# An organisation's conventions, shared by its projects. folder_prefix: a dataset folder named
+# <prefix><project> belongs to the family (and takes its tenant) when the manifest does not say.
+FAMILIES = {
+    "apache": {
+        "folder_prefix": "apache-", "tenant": "apache",
+        "settings": {
+            "notifiers": {
+                "jira@apache.org": "tracker",        # "[jira] [Created] (KEY-1) ..." -> ANNOUNCES the ticket
+                "git@apache.org": "code_host",       # "URL: https://github.com/<repo>/pull/N" -> ANNOUNCES the PR / issue
+                "builds@apache.org": "ci",           # CI results: noise, counted and not linked
+            },
+            "tracker_notice_subject": r"^\[jira\] \[\w+\] \(([A-Z][A-Z0-9]+-\d+)\)",
+            "vote_threads": True,                    # consensus votes on the dev list
+            "directory_tool": "asf", "directory_name": "apache", "directory_email_domain": "apache.org",
+            "directory_login_tools": ["jira", "confluence"],   # ASF Jira and Confluence usernames are the ASF id
+        },
+    },
 }
 PRESETS = {
-    "kafka": {"default_branch": "trunk", "decision_prefix": "KIP", "vote_threads": True},
-    "flink": {"default_branch": "master", "decision_prefix": "FLIP", "vote_threads": True},
-    "spark": {"default_branch": "master", "decision_prefix": "SPIP", "vote_threads": True},
-    "tvm": {"default_branch": "main", "decision_prefix": "RFC", "issue_tracker": "github", "vote_threads": True},
+    "kafka": {"family": "apache", "default_branch": "trunk", "decision_prefix": "KIP",
+              "release_branches": r"\d+\.\d+", "release_branch_since": "2024-01-01"},
+    "flink": {"family": "apache", "default_branch": "master", "decision_prefix": "FLIP"},
+    "spark": {"family": "apache", "default_branch": "master", "decision_prefix": "SPIP"},
+    "tvm": {"family": "apache", "default_branch": "main", "decision_prefix": "RFC", "issue_tracker": "github"},
+}
+NOTIFIER_KINDS = {"jira": "tracker", "github": "code_host"}  # the names older manifests use
+
+# The people directory, one row per person (people/directory.json | .jsonl | .csv). Only `id` is required.
+# This is the shape an HR system or identity-provider connector writes; the ASF roster reader produces the
+# same rows from whimsy's files.
+DIRECTORY_ROW = {
+    "id": "the person's id in the directory (required)",
+    "name": "full name",
+    "email": "work address; or `emails`: a list, the first is the primary",
+    "title": "job title",
+    "employment_type": "employee | contractor | ...",
+    "location": "where the person works",
+    "timezone": "IANA zone",
+    "status": "active (default) | inactive | ...",
+    "start_date": "first day",
+    "end_date": "last day (stored as the exclusive end, the next day)",
+    "manager": "the manager's id (REPORTS_TO, kind line)",
+    "teams": "team names, or {id, name, kind, role, since, until} (Group + dated MEMBER_OF); or `team`: one name",
+    "position": "{id, name, kind, since, until}: the seat held (Position + HOLDS_POSITION); with only a title, "
+                "the person's own seat is named after the title",
+    "accounts": "{tool: login or id} of the same person in other tools (HAS_ACCOUNT, verified, once that account is loaded)",
 }
 
-# folder -> (files the adapter reads, fields each JSON(L) row needs, the manifest keys it needs)
+# folder -> (files the adapter reads, fields each JSON(L) row needs, the manifest keys it needs).
+# "a|b|c" in the file list: any one of them is enough.
 CONTRACT = {
-    "people": (["people/public_ldap_people.json", "people/committee-info.json", "people/public_ldap_projects.json"], {}, ["project"]),
+    "people": (["people/directory.json|people/directory.jsonl|people/directory.csv|people/public_ldap_people.json"],
+               {"people/directory.jsonl": ["id"]}, []),
     "jira": (["jira/statuses.json", "jira/versions.json", "jira/issues/*.json"], {}, ["jira"]),
     "linear": (["linear/organization.json", "linear/users.json", "linear/teams.json", "linear/issues/page-*.json"], {}, []),
     "github": (["github/repo.json"], {"github/repo.json": ["id", "full_name"]}, []),
@@ -59,6 +116,11 @@ CONTRACT = {
     "code": (["code/"], {}, []),
     "docs": (["docs/"], {}, []),
 }
+
+
+def _family_by_folder(data: Path):
+    name = data.resolve().name
+    return next((f for f in FAMILIES.values() if f.get("folder_prefix") and name.startswith(f["folder_prefix"])), None)
 
 
 def load_manifest(data: Path) -> tuple[dict, list[str]]:
@@ -76,24 +138,41 @@ def load_manifest(data: Path) -> tuple[dict, list[str]]:
         manifest["fetched_at"] = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         if path.exists():
             notes.append("manifest has no fetched_at: using now")
-    if not manifest.get("tenant"):
-        name = data.resolve().name
-        manifest["tenant"] = "apache" if name.startswith("apache-") else name.replace(":", "-")
-    if not manifest.get("project") and data.resolve().name.startswith("apache-"):
-        manifest["project"] = data.resolve().name[len("apache-"):]
+    name, by_folder = data.resolve().name, _family_by_folder(data)
+    if not manifest.get("tenant"):  # a family's folder ("apache-kafka") is that family's tenant; else the folder name
+        manifest["tenant"] = by_folder["tenant"] if by_folder else name.replace(":", "-")
+    if not manifest.get("project") and by_folder:
+        manifest["project"] = name[len(by_folder["folder_prefix"]):]
     return manifest, notes
 
 
+def family_of(manifest: dict, data: Path):
+    """The family whose conventions apply: the manifest's "family", else the preset's, else the folder's prefix."""
+    preset = PRESETS.get((manifest.get("project") or "").lower(), {})
+    named = (manifest.get("settings") or {}).get("family") or manifest.get("family") or preset.get("family")
+    if named:
+        return FAMILIES.get(str(named).lower())
+    return _family_by_folder(data)
+
+
 def project_settings(manifest: dict, data: Path) -> dict:
-    """Effective settings: manifest overrides, then the project's preset, then the defaults."""
+    """Effective settings: manifest overrides, then the project's preset, then its family, then the defaults."""
     s = json.loads(json.dumps(DEFAULTS))
     preset = PRESETS.get((manifest.get("project") or "").lower(), {})
-    for src in (preset, manifest.get("settings") or {}):
+    family = family_of(manifest, data) or {}
+    for src in (family.get("settings") or {}, preset, manifest.get("settings") or {}):
         for k, v in src.items():
+            if k == "family":
+                continue
             if isinstance(v, dict) and isinstance(s.get(k), dict):
                 s[k] = {**s[k], **v}
             else:
                 s[k] = v
+    s["notifiers"] = {k: NOTIFIER_KINDS.get(v, v) for k, v in s["notifiers"].items()}
+    if not s["release_branch_since"]:
+        window = manifest.get("window")
+        since = window.get("since") if isinstance(window, dict) else window[0] if isinstance(window, (list, tuple)) and window else None
+        s["release_branch_since"] = since if isinstance(since, str) else None
     if not s["default_branch"]:
         repo = data / "github" / "repo.json"
         try:
@@ -135,8 +214,8 @@ def check_inputs(data: Path, manifest: dict) -> dict:
         for pattern in files:
             if pattern.endswith("/"):
                 continue
-            if not list(data.glob(pattern)):
-                problems.append(f"missing {pattern}")
+            if not any(list(data.glob(alt)) for alt in pattern.split("|")):
+                problems.append("missing " + " or ".join(pattern.split("|")))
         for key in needs:
             if not manifest.get(key):
                 problems.append(f'manifest.json has no "{key}"')

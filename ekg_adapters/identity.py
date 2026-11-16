@@ -1,15 +1,16 @@
 """Identity resolution: attach each tool's accounts and addresses to Persons.
 
 The People pillar's ladder, strongest evidence first:
-  1. the directory itself (admin, verified)            ASF roster, or an HR / IdP adapter
+  1. the directory itself (admin, verified)            people/directory.*, a roster, or an HR / IdP connector;
+                                                        and the accounts in other tools the directory names
   2. a verified email from a tool that verifies it      Slack and Linear accounts, GitHub SAML SSO: joins the directory
      (verified_email, verified)                         Person who owns the address; with no directory,
                                                         a Person is made for the address
   3. an address the person is known to own              commits and mail sent from it
   4. one tool's record about another                    a merged PR whose merge commit came from a person's
                                                         address -> the PR author's GitHub account
-  5. the same login in another tool on the same         Jira / Confluence username == directory id
-     directory
+  5. the same login in another tool on the same         a tool that signs in with the directory's ids
+     directory                                          (setting directory_login_tools)
   6. a unique exact display name                        credit only
 Steps 1 and 2 are verified and grant access; the rest are inferred, which names the
 person but grants nothing. Accounts that match nothing stay unresolved authors.
@@ -45,6 +46,19 @@ def resolve_identity(g: Graph):
                link_method=link_method or ("verified_email" if verified else "inferred"), verified=verified)
         stats[f"{tool}: {how}"] += 1
         tools_of[key].add(tool)
+
+    # ---- step 1: the accounts in other tools that the directory itself names (accounts: {tool: login or id})
+    named = g.ctx.get("directory_names_account", {})
+    if named:
+        for r in list(g.records.values()):
+            if r["type"] != "Account" or r["props"].get("is_bot"):
+                continue
+            tool = r["props"]["source_tool"]
+            ids = {str(r["props"][k]).casefold() for k in ("login", "native_id") if r["props"].get(k) not in (None, "")}
+            key = next((named[tool, i] for i in sorted(ids) if (tool, i) in named), None)
+            if key in persons and (key, r["id"]) not in done_github:
+                attach(key, r, tool, "named by the directory", 1.0, verified=True, method="snapshot", link_method="admin")
+                done_github.add((key, r["id"]))
 
     # ---- step 2: verified emails (Slack, Linear) and GitHub SAML SSO identities
     saml = g.ctx.get("github_saml", set())
@@ -118,11 +132,13 @@ def resolve_identity(g: Graph):
                 done.add((key, gh["id"]))
                 attach(key, gh, "github", "noreply address owned by the person", 0.8, evidence=[lk["a"]])
 
-    # ---- steps 5 and 6: Jira and Confluence (no verified email): same login, else a unique display name
+    # ---- steps 5 and 6: tools with no verified email (Jira, Confluence): the same login where the tool signs in
+    # with the directory's ids (setting directory_login_tools), else a unique display name
+    same_login = set(g.ctx.get("settings", {}).get("directory_login_tools") or ())
     for tool in ("jira", "confluence"):
         for acct in g.ctx.get(f"{tool}_accounts", {}).values():
             login, name = acct["props"].get("login"), (acct["props"].get("display_name") or "").casefold()
-            if login in persons:
+            if tool in same_login and login in persons:
                 attach(login, acct, tool, "same login as the directory", 0.9)
             elif name in unique_name:
                 attach(unique_name[name], acct, tool, "unique display name", 0.7)

@@ -49,16 +49,19 @@ python -I ekg-eval-data/summary_pdf.py     # all of the above, written up as ~/D
 |---|---|
 | `common.py` | The record and link envelope (`_key`, ids, claim ids, cores and predicates from the registry), merge by key and claim id, UTC times, Jira markup and Confluence XHTML to text, validation, writing |
 | `access.py` | One AccessScope per place (directory, repo, Jira project, each list, wiki space), granted to the Public principal |
-| `people.py` | Rosters to Person, Account, Group, Position and the person's apache.org address; verified HAS_ACCOUNT |
+| `people.py` | A people directory (`people/directory.json`, `.jsonl` or `.csv`, or the ASF rosters read into the same rows) to Person, Account, EmailAddress, Group with dated MEMBER_OF, Position with HOLDS_POSITION, REPORTS_TO; verified HAS_ACCOUNT |
 | `jira.py` | Tickets, states, IN_STATE and ASSIGNED_TO history and description versions from the changelog, one Activity + FieldChanges per change, versions, labels, comments, ticket links |
 | `github.py` | Repo, PRs, reviews, review threads, comments, branches, dated labels and review requests, changed files, derived APPROVED_BY (marked stale after new commits), CI, tags |
 | `git.py` | Commits (this kit's shape, `{subject, body, files_changed}`, or GitHub REST commit objects), parents, authors and co-authors as EmailAddress, files changed; a noreply address links to its GitHub account. Makes the Repository itself when there is no `github/` folder |
 | `issues.py` | GitHub issues (`issues/*.json(l)`, scraper or REST shape) to Ticket `<owner/repo>#<n>`, open/closed states with dates, labels, assignees, comments, linked PRs; `#n` in text is resolved to the issue or the PR |
 | `code.py` | The code tree (`code/`, a checkout or a `tree.json(l)` listing) to Folder and File (merged with git's Files), README/docs text, and for Python: module, class, function and method CodeSymbols DEFINED_IN their file, IMPORTS between modules |
+| `symbols.py` | The code parse for any language, on tree-sitter: what a language's symbols look like is data (the grammar pack's tags query plus the extra patterns in `QUERIES`), so adding a language adds no code. File, class, interface, trait, enum, struct, record, object, function, method and constructor CodeSymbols with qualified name, signature and lines, DEFINED_IN their file; IMPORTS, EXTENDS (role extends or implements) and CALLS only where the language's own name binding settles the target inside the repository; everything else is counted. A file type with no grammar or no symbol query is skipped and counted. `map_symbols(g, repo, scope, rid, files, texts)`; `extract(path, text)` for one file |
 | `mail.py` | Lists (address from settings, else List-Id, else folder name; any `.mbox` name), messages (an id is generated when Message-ID is missing; duplicates kept once), threads, senders. Notifier senders from settings: Jira notices ANNOUNCE their ticket, `git@apache.org` / GitHub notices their PR or issue, CI mail is counted as noise. Human mail DISCUSSES the keys in its subject and MENTIONS those in its own (unquoted) text; proposal threads queue MADE_IN |
 | `forum.py` | A Discourse forum (`forum/topics/*.json`) to Thread (kind discussion) and Comment posts, with REPLY_TO, authors, and ticket, PR and `#n` references |
-| `wiki.py` | Space, pages, version history, a Piece per section, labels, comments; each proposal page (the settings' `decision_prefix`, KIP for Kafka) becomes a Decision, its status read from the page's state line |
-| `docs.py` | Stored documents (`docs/`: PDF with pypdf when installed, .xlsx, .csv/.tsv, .md/.txt/.rst, .html) to File, ContentVersion and a Piece per page or sheet, with ticket and `#n` MENTIONS |
+| `doctext/` | The document readers, with no graph knowledge: Confluence storage XHTML, HTML, Markdown (with front matter), text / rst, PDF (pdfplumber for tables, else pypdf), .docx, .pptx, .xlsx (standard library), .csv / .tsv, each to one `DocText`: ordered blocks (heading, paragraph, list item, table, code, quote, and page / slide / sheet containers) with their refs (address, page link, attachment, image, user mention, ticket key, email), the canonical text with every block's offsets, the file's own properties, and a `quality` record of what could not be read. `read(path_or_bytes, name)` picks the reader. Nothing is cut |
+| `docgraph.py` | The one emitter every document source uses: a `DocText` to DocSection (per heading, page, slide, sheet), Piece (`text`, `kind`, `heading`, `order`, `span`; about 4,000 characters, a long table cut between rows with the header repeated), NEXT, the links its refs make, FileMetadata, front-matter status / date / owner, SAME_CONTENT_AS, and the `documents` section of the build report (how well each document was read) |
+| `wiki.py` | Space, pages, version history, sections and pieces for every version that has a body, attachments, labels, comments, page and section editors; each proposal page (the settings' `decision_prefix`, KIP for Kafka) becomes a Decision, its status read from the page's state line as the reader gives it |
+| `docs.py` | Stored documents (`docs/` at any depth: every format `doctext` reads) to File (sha256, size, mime type), a ContentVersion keyed by the content hash and dated by the file's time, sections and pieces, with ticket and `#n` MENTIONS. `map_file(g, name, bytes, meta, scope)` takes one file as a connector hands it over; the folder walk is one caller |
 | `settings.py` | Per-project settings and presets (kafka, flink, spark, tvm), and the input contract checked before the run |
 | `linear.py` | Linear workspace, users, teams (states, labels, cycles), projects (status updates, milestones), issues with IN_STATE / ASSIGNED_TO / HAS_LABEL history, comments, attachments, relations, documents. Private teams are scoped to their members |
 | `slack.py` | Slack workspace, users, channels, private channels, group DMs and DMs, messages, threads, files, reactions, pins, topic and rename history. Public channels are granted to full members; private ones to their members, dated from join and leave events |
@@ -68,13 +71,13 @@ python -I ekg-eval-data/summary_pdf.py     # all of the above, written up as ~/D
 
 ### Project settings and the input contract
 
-Kafka's habits are no longer in the code. They are settings, with a preset per project (picked by the manifest's `project`) and overrides in the manifest's `"settings"`:
+No project's or organisation's habits are in the code. They are settings: generic defaults, then an organisation's shared conventions (a family, e.g. `apache`), then a preset per project (picked by the manifest's `project`), then overrides in the manifest's `"settings"`:
 
 ```json
 {"project": "tvm", "repo": "apache/tvm", "tenant": "apache", "fetched_at": "2026-10-30T00:00:00Z",
  "settings": {"default_branch": "main", "decision_prefix": "RFC", "issue_tracker": "github",
               "mail_lists": {"dev": "dev@tvm.apache.org"},
-              "notifiers": {"notifications@github.com": "github", "builds@apache.org": "ci"},
+              "notifiers": {"notifications@github.com": "code_host", "builds@apache.org": "ci"},
               "infer_people": "auto", "public": true}}
 ```
 
@@ -84,7 +87,10 @@ Kafka's habits are no longer in the code. They are settings, with a preset per p
 | `decision_prefix` | none (`KIP` for kafka, `FLIP` flink, `SPIP` spark, `RFC` tvm) | wiki (Decision pages), mail and git (MADE_IN / ENACTS) |
 | `issue_tracker` | `github` when there is an `issues/` folder | `#n` and "Fixes #n" in commits, PRs, mail, forum and docs |
 | `mail_lists` | List-Id header, else the folder name | mail |
-| `notifiers`, `ci_subject` | Jira, `git@apache.org`, GitHub, `builds@apache.org` | mail: which senders are integrations and which are CI noise |
+| `notifiers`, `tracker_notice_subject`, `ci_subject` | `notifications@github.com` only (the `apache` family adds `jira@apache.org`, `git@apache.org`, `builds@apache.org` and the `[jira] [Created] (KEY-1)` subject) | mail: which senders are integrations (`tracker`, `code_host`, `ci`) and where a tracker notice names its ticket |
+| `vote_threads` | off (on for the `apache` family) | mail: votes and tallies in `[VOTE]` threads about a decision key |
+| `release_branches`, `release_branch_since` | common namings (`4.3`, `release-1.18`, `branch-3.5`, `v0.15`); from the window's start (kafka: `\d+\.\d+`, from 2024-01-01) | git: which branches' commits are read as release-branch commits |
+| `directory_tool`, `directory_name`, `directory_link_method`, `directory_email_domain`, `directory_login_tools` | `directory`, the tenant, `admin` (`csv` for a CSV), none, none (the `apache` family: `asf`, `apache`, `apache.org`, Jira and Confluence) | people and identity |
 | `infer_people` | `auto` (only when there is no directory) | identity |
 
 Before anything runs, `check_inputs` reads the contract in `settings.py`: per folder, the files the adapter needs, the fields its rows need and the manifest keys. A missing file or manifest key skips that adapter with the reason; an unreadable file or bad JSONL lines are reported and the adapter skips just those rows. The report's `adapters` section says, per folder, `ran`, `skipped` or `failed` and why, and `notes` counts every skipped row by reason. Without a `manifest.json` the tenant is the folder name and `fetched_at` is now.
@@ -107,7 +113,7 @@ Fixed in query-master (spec `app/ekg/spec/ekg-pillars.html`, builder `scripts/bu
 | DECIDED_BY / ASSIGNED_TO needed an Account | Both also go to Alias and EmailAddress, as AUTHORED_BY does | LLM fill (mailing-list deciders and owners) |
 | A sender known only by name had nowhere to go | EmailMessage `sender_name` | mail (list-rewritten senders) |
 | A chat Thread couldn't be IN its Channel | IN allows Thread | Slack |
-| Page sections couldn't be DocSections | PART_OF allows DocSection (-> Document) | not used yet: wiki sections are still Pieces |
+| Page sections couldn't be DocSections | PART_OF allows DocSection (-> Document) | wiki: a page's top sections are PART_OF the page, deeper ones SECTION_OF their parent |
 
 Still open (not needed to store the data):
 
@@ -115,6 +121,46 @@ Still open (not needed to store the data):
 * **Some enumerated states aren't enforced.** `PullRequest.state` (R70), `Review.state` and `TicketState.type` accept any string.
 * **There's no body-text field on Ticket or PullRequest.** Descriptions go into ContentVersion. The adapter guide should say so.
 * **Tickets can't be AUTHORED_BY their reporter**, although the Tickets adapter contract says so. The adapters use CREATED_BY role reporter.
+
+## The landing layout: how a live connector plugs in
+
+The interface between "getting the data" and "building the graph" is the dataset folder: one sub-folder per source, in the shapes below, plus `manifest.json`. `fetch_apache.py` and `fetch_linear.py` are two ways to fill it; a live connector is a third. It writes the same shapes (or calls the same map function with rows), and nothing downstream changes: the linker, identity resolution, validation, the SQLite store and the LLM fill only read records, links and the adapters' shared lookups.
+
+The contract is `settings.CONTRACT`, and `check_inputs` checks a folder against it before anything runs:
+
+| Folder | Files the adapter reads | Required in them | Map function |
+|---|---|---|---|
+| `people/` | `directory.json`, `directory.jsonl` or `directory.csv` (one row per person), or the ASF roster files | `id` per row | `people.map_people`, or `people.emit_directory(g, {"people": rows}, settings)` with rows in hand |
+| `jira/` | `statuses.json`, `versions.json`, `issues/*.json` (REST v2 search pages with changelog) | manifest `jira` (the project key) | `jira.map_jira` |
+| `linear/` | `organization.json`, `users.json`, `teams.json`, `issues/page-*.json` (GraphQL shapes) | | `linear.map_linear` |
+| `github/` | `repo.json`, then `pulls/`, and the other REST dumps | `id`, `full_name` | `github.map_github` |
+| `issues/` | `issues/*.json` or `.jsonl` | `number`, `title`; manifest `repo` | `issues.map_issues` |
+| `git/` | `commits.jsonl` (any shape `git.normalize_commit` reads); optionally `repo.git` for tags and release branches | `sha` | `git.map_git` |
+| `mail/` | `<list>/*.mbox` or `*.mbox` | | `mail.map_mail` |
+| `slack/` | `users.json` and the export's channel folders | | `slack.map_slack` |
+| `wiki/` | `space.json`, `pages/*.json` | | `wiki.map_wiki` |
+| `forum/` | `topics/*.json` | `id`, `title` | `forum.map_forum` |
+| `code/` | a listing (`tree.jsonl`: `{path, sha}`) or the files themselves | | `code.map_code`; symbols of any language: `symbols.map_symbols(g, repo, scope, rid, files, texts)` |
+| `docs/` | any documents | | `docs.map_docs` |
+
+The people directory is the shape an HR system or identity provider connector writes (`settings.DIRECTORY_ROW`); only `id` is required:
+
+```json
+{"id": "e-101", "name": "Bob Ruiz", "emails": ["bob@acme.io"], "title": "Backend Engineer", "manager": "e-100",
+ "start_date": "2025-02-01", "end_date": null,
+ "teams": [{"name": "Payments", "since": "2025-02-01"}],
+ "position": {"id": "pos-41", "name": "Backend Engineer II"},
+ "accounts": {"github": "bob-gh", "slack": "U02BOB"}}
+```
+
+It becomes a Person, the person's Account in the directory (HAS_ACCOUNT, verified), an EmailAddress per address, a Group per team with dated MEMBER_OF, a Position with dated HOLDS_POSITION (the person's own seat, named after the title, when the row names no seat), REPORTS_TO the manager, and a verified HAS_ACCOUNT to each account in another tool that the row names. A last day is stored as the exclusive end. The ASF roster reader produces these same rows from whimsy's files, so both go through one function.
+
+What a connector has to supply besides the files is in `manifest.json`:
+
+- `tenant` (else the folder name), `fetched_at` (else now), `repo`, `jira`, `window`, and optionally `id_secret` (the key record ids are derived with).
+- `settings`: anything in `settings.DEFAULTS` that differs for this source. The defaults name no organisation. A project's habits are a preset (`PRESETS`), and an organisation's shared ones are a family (`FAMILIES`, e.g. `apache`: its notifier addresses, its roster's tool name and mail domain, votes on the dev list); a preset names its family and a manifest may too (`"family": "apache"`).
+
+Adding a tool that has no adapter yet is one module with a `map_<tool>(g, data_dir, ...)` function, a line in `CONTRACT` and a line in `pipeline.ADAPTERS`. Its `source_tool` name needs no registration: a tool the kit has not seen is counted under the pillar of each record's type. Only two adapters take rows directly today (`people.emit_directory`, `symbols.map_symbols`, and `git.normalize_commit` for one commit); the others read their folder, so a connector that streams rows writes them to the folder first.
 
 ## Linear and Slack
 
@@ -160,6 +206,8 @@ python -I ekg-eval-data/test_tvm_fill.py
 ```
 
 `test_tvm_fill.py` runs the pipeline on `fixtures/tvm/`, which has the shapes from the TVM test run: GitHub issues instead of Jira, `{subject, body, files_changed}` commits, an mbox with no List-Id that holds `git@apache.org` PR notices, a CI notice, a message with no Message-ID and a duplicate, a Discourse forum, a Python code tree, and a csv/xlsx/md `docs/` folder, with no directory and no `github/` folder. A bad JSONL line, an issue with no number and a broken forum file are there on purpose. It checks `#n` resolution, "Fixes #n", PR notices, inferred people, the code symbols and imports, and the skip-and-report handling. It also tests the LLM fill writer with a stand-in model (no key, no cost): the quote check, and the Decision, ActionItem, Guideline and Knowledge records with their DECIDED_BY, ASSIGNED_TO and AUTHORED_BY links.
+
+`test_symbols.py` reads Java, Scala, Python, TypeScript, Go and C# snippets with the one extractor (symbols, nesting, imports, an unknown file type skipped) and builds a small mixed-language repository to check DEFINED_IN, IMPORTS, EXTENDS and CALLS. `test_directory.py` lays `fixtures/acme_directory/` over `fixtures/acme/`: a generic people directory, a mailing list and settings that name no foundation (tenant `acme`, directory tool `workday`); it checks the directory's records and links, that the directory's Person is the one every tool's account joins, that no record carries another organisation's tenant, tool or address, and that the proposal and vote logic does nothing when its settings are off.
 
 The test runs the whole pipeline on `fixtures/acme/`. That's a small synthetic company in the real Linear GraphQL and Slack export shapes, plus a GitHub and git slice; none of it is real people. The test checks that every item validates and that the links above exist. It also checks access the way the spec's access layer works: a person's verified accounts, then their groups, then their grants, at a point in time. For example:
 * a guest sees only their channels

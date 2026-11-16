@@ -1,6 +1,7 @@
-"""Run every step on one fetch_apache.py download and report on it.
+"""Run every step on one dataset folder (the landing layout: one folder per source, see settings.CONTRACT)
+and report on it.
 
-  1. adapters, one per source present (people, jira, linear, github, git, mail, slack, wiki + KIP decisions)
+  1. adapters, one per source present (people, jira, linear, github, git, mail, slack, wiki + decision proposals)
   2. linker: resolve cross-source references
   3. identity: attach accounts and addresses to Persons
   4. coverage: how well the pillars ended up joined
@@ -27,6 +28,7 @@ from .people import map_people
 from .slack import map_slack
 from .wiki import map_wiki
 from .code import map_code
+from . import docgraph
 from .docs import map_docs
 from .forum import map_forum
 from .issues import map_issues
@@ -99,9 +101,9 @@ def coverage(g: Graph):
                                                          lambda r: r["props"].get("state") == "merged"),
         "commits linked to a PR": share("Commit", has(("MERGED_AS", "PullRequest"))),
         "commits linked to a ticket": share("Commit", has(("IMPLEMENTS", "Ticket"))),
-        "KIP decisions linked to a discussion email": share("Decision", has(("MADE_IN", "EmailMessage"))),
-        "KIP decisions linked to a ticket": share("Decision", has(("ABOUT", "Ticket"))),
-        "KIP decisions enacted by a PR or commit": share("Decision", has(("ENACTS", "PullRequest"), ("ENACTS", "Commit"))),
+        "decision proposals linked to a discussion email": share("Decision", has(("MADE_IN", "EmailMessage"))),
+        "decision proposals linked to a ticket": share("Decision", has(("ABOUT", "Ticket"))),
+        "decision proposals enacted by a PR or commit": share("Decision", has(("ENACTS", "PullRequest"), ("ENACTS", "Commit"))),
         "emails linked to a ticket or decision": share("EmailMessage", to_type("Ticket", "Decision")),
         "chat messages linked to a ticket or PR": share("Message", to_type("Ticket", "PullRequest"), human_msg),
     }
@@ -116,7 +118,7 @@ def coverage(g: Graph):
 
 ADAPTERS = [  # (source folder, step name, function, extra args from the manifest); trackers first, so later
               # adapters recognise their ticket keys, and the GitHub adapter before git so the repo record is its
-    ("people", "people adapter", map_people, lambda m: [m["project"]]),
+    ("people", "people adapter", map_people, lambda m: [m.get("project")]),
     ("jira", "jira adapter", map_jira, lambda m: [m["jira"], m.get("repo", "")]),
     ("linear", "linear adapter", map_linear, lambda m: []),
     ("github", "github adapter", map_github, lambda m: [m.get("repo", "")]),
@@ -135,7 +137,7 @@ def run(data: Path, query_master: Path, out: Path | None = None, raw_check: bool
     """Run every adapter whose source folder is present in `data`, then link, resolve identity and validate."""
     common.bind(query_master)
     manifest, manifest_notes = load_manifest(data)
-    common.set_tenant(manifest["tenant"])
+    common.set_tenant(manifest["tenant"], manifest.get("id_secret"))
     g = Graph(observed_at=manifest["fetched_at"])
     g.ctx["repo_name"] = manifest.get("repo", "")
     g.ctx["slack_workspace_name"] = manifest.get("slack_workspace")
@@ -172,6 +174,8 @@ def run(data: Path, query_master: Path, out: Path | None = None, raw_check: bool
             log(f"  {name}: FAILED ({adapters[folder]['why']})")
     linked = step("cross-source linker", resolve, g)
     identity = step("identity resolution", resolve_identity, g)
+    step("document owners", docgraph.finish, g)  # front-matter owners need the Persons identity resolution made
+    documents = docgraph.report(g)               # how well each document was read (the schema has no place for it)
     cov = coverage(g)
     rec_report, link_report, pillars = step("validation", g.validate)
     if out:
@@ -190,6 +194,6 @@ def run(data: Path, query_master: Path, out: Path | None = None, raw_check: bool
                    "links": sum(v["checked"] for v in link_rows.values()), "links_valid": sum(v["valid"] for v in link_rows.values()),
                    "record_types": len({k.split(' (')[0] for k in rec_rows}), "link_types": len(link_rows)},
         "raw": raw, "records": rec_rows, "links": link_rows, "cross_pillar": dict(pillars.most_common()),
-        "linker": linked, "identity": identity, "coverage": cov, "stubs": dict(g.stubs),
+        "linker": linked, "identity": identity, "coverage": cov, "stubs": dict(g.stubs), "documents": documents,
         "notes": dict(sorted(g.notes.items())), "timings_s": {**timings, "total": round(time.time() - t0, 1)},
     }

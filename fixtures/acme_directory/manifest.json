@@ -1,0 +1,16 @@
+{
+ "tenant": "acme",
+ "project": null,
+ "repo": "acme/payments",
+ "slack_workspace": "Acme",
+ "fetched_at": "2026-10-05T00:00:00Z",
+ "window": {"since": "2026-10-01", "until": "2026-10-04"},
+ "settings": {
+  "public": false,
+  "directory_tool": "workday",
+  "directory_name": "acme-hr",
+  "decision_prefix": null,
+  "notifiers": {"tracker-bot@acme.io": "tracker", "ci@acme.io": "ci"}
+ },
+ "note": "Synthetic. Laid over fixtures/acme by test_directory.py: a people directory, a mailing list, and settings that name no open-source foundation."
+}

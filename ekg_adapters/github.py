@@ -191,10 +191,10 @@ def map_github(g: Graph, d: Path, repo_name: str):
             g.link("AUTHORED_BY", cm, account(c["user"]), "field", role="author", at=at)
             if c["user"]["type"] == "Bot":
                 g.notes["github: bot comments (CI notices, kept but marked by the bot author)"] += 1
-        # the PR's own commits (head commits, mostly not on trunk): referenced by sha for the linker
+        # the PR's own commits (head commits, mostly not on the default branch): referenced by sha for the linker
         for pos, c in enumerate(x.get("commits") or []):
-            # the PR's own commits (mostly on its branch, not on trunk): records of their own, so the PR's commit
-            # count and history are in the graph; a trunk commit with the same sha is the same record
+            # the PR's own commits (mostly on its branch, not on the default branch): records of their own, so the PR's commit
+            # count and history are in the graph; a default-branch commit with the same sha is the same record
             inner = c.get("commit") or {}
             if c["sha"] not in commits:
                 commits[c["sha"]] = g.rec("Commit", "git", c["sha"], {

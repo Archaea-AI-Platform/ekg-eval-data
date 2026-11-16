@@ -13,7 +13,14 @@ counted with its reason, never asked.
   decision_status  decision page with no status      -> Decision.status, cited to the page
   knowledge        conversation (mail, chat, forum,  -> Knowledge / Decision / Guideline / Requirement / ActionItem / Question
                    PR and ticket comments)              records (extract, then judge), with who said, asked, decided or took it on
-  doc_knowledge    stored documents, recent wiki      -> the same records, from one document's text
+  doc_facts        every document, read whole         -> the records and links the schema supports (extract_facts.py)
+  table_map        every table, one call each         -> a column mapping, applied to every row by code (extract_tables.py)
+  doc_knowledge    every document, read whole         -> the six knowledge types only, extract then judge. doc_facts
+                                                         covers them in the same read, so this kind is not run by default
+
+Nothing here has a fixed character cap. A text is shown whole; what one call can carry comes from the
+model's context window (fill_budget.sizes), and a conversation or document longer than that is read in
+consecutive windows cut between messages or pieces, so nothing is left unread.
 """
 
 from __future__ import annotations
@@ -25,20 +32,20 @@ import re
 import unicodedata
 from dataclasses import dataclass, field
 
-TEXT_CAP = 1500        # characters of one subject source shown to the model
-DOC_TEXT_CAP = 9000    # a document, read whole (one source)
-CANDIDATE_CAP = 600    # characters of one candidate
-PROMPT_CAP = 14000     # everything together; under query-master's LLM_PROMPT_CHAR_BUDGET (20,000)
-MAX_CANDIDATES = 5
-MAX_SOURCES = 8
+from . import common, extract_schema, fill_budget, fill_docs
+
+MAX_CANDIDATES = 5      # how many candidates the search proposes for one gap (a search setting, not a text limit)
+MIN_CONVERSATION = 600  # characters: a thread shorter than this, or with one message, is not a conversation
 
 NOT_FIXED = {"duplicate", "won't fix", "invalid", "not a bug", "not a problem", "cannot reproduce", "abandoned",
              "later", "information provided", "won't do", "incomplete", "auto closed", "workaround"}
 NO_TICKET = re.compile(r"^\s*\[?(minor|hotfix|trivial)\]?\b", re.I)  # the project's own "needs no ticket" markers
 SHA = re.compile(r"\b[0-9a-f]{7,40}\b")
 PR_REF = re.compile(r"(?:/pull/|(?<![\w/])#)(\d{1,6})\b")
-DECISION_STATUS = ["proposed", "accepted", "superseded", "reversed", "reinstated", "disputed"]
 GUIDELINE_STRENGTH = ["must", "should", "avoid"]
+# kinds that answer with an item (and a quote) for every fact they read: their text is bounded by the reply too.
+# Judge kinds (a choice among candidates, a table's column mapping) answer in a few lines whatever they read.
+ANSWER_GROWS_WITH_TEXT = {"doc_facts", "knowledge", "doc_knowledge"}
 KNOWLEDGE_KINDS = ["how_to", "workaround", "gotcha", "norm", "folklore", "rationale", "tip", "warning", "fact"]
 
 
@@ -61,6 +68,8 @@ class Task:
     sources: list[Item]             # the subject's own text
     candidates: list[Item]          # records or values to choose among ([] for knowledge)
     write: dict = field(default_factory=dict)
+    context: str = ""               # shown before the text: where this window sits (document title, outline, part)
+    extra: str = ""                 # anything else the answer depends on (a table's full content hash)
 
     @property
     def id(self) -> str:
@@ -68,6 +77,8 @@ class Task:
         h = hashlib.sha1(f"{self.kind}|{self.subject}".encode())
         for it in self.sources + self.candidates:
             h.update(f"|{it.label}:{it.id}:{it.title}:{it.text}".encode())
+        if self.context or self.extra:
+            h.update(f"|{self.context}|{self.extra}".encode())
         return "t_" + h.hexdigest()[:20]
 
     def labels(self) -> list[str]:
@@ -77,7 +88,15 @@ class Task:
 class View:
     """Read-only lookups over the written graph."""
 
-    def __init__(self, records, links):
+    def __init__(self, records, links, budget=None, doc_sample=None, doc_quality=None):
+        self.budget = budget or fill_budget.sizes()   # what one call may carry
+        self.overhead = {}                            # kind -> characters of instructions and schema around the text
+        self.doc_sample, self.doc_quality = doc_sample, doc_quality or {}
+        self.cut = collections.Counter()              # texts larger than a whole window, cut at line ends, by kind
+        self.quoted = collections.Counter()           # characters of quoted earlier messages left out (dequote), by kind
+        self.claimed = set()                          # table pieces a table_map task reads: the reading kinds leave them out
+        self._fields = {}                             # (type, field) -> {value: [record ids]}, built when first asked
+        self._docs = self._names = self._identity = self._catalog = None
         self.rec = {r["id"]: r for r in records}
         self.out, self.inn = collections.defaultdict(list), collections.defaultdict(list)
         for lk in links:
@@ -117,12 +136,157 @@ class View:
             return p.get("display_name") or p.get("login") or p.get("address") or "?"
         return "?"
 
+    # ---- sizing
+    def room(self, kind, share=1.0):
+        """Characters of text one call of this kind may carry: the window less its instructions, and for a kind
+        whose answer grows with what it reads, also no more than the reply can answer (fill_budget.read_chars)."""
+        room = self.budget.room(self.overhead.get(kind, 4000))
+        if kind in ANSWER_GROWS_WITH_TEXT:
+            room = min(room, self.budget.read_chars)
+        return int(room * share)
+
+    # ---- documents (fill_docs), read once
+    def docs(self):
+        if self._docs is None:
+            self._docs = fill_docs.documents(self, self.doc_sample, self.doc_quality)
+        return self._docs
+
+    def catalog(self):
+        if self._catalog is None:
+            self._catalog = extract_schema.Catalog(common._reg, [t for t, rs in self.by_type.items() if rs])
+        return self._catalog
+
+    # ---- finding a record by what a text calls it
+    def _index(self):
+        if self._names is None:
+            self._names = collections.defaultdict(list)
+            self._prefix = collections.defaultdict(dict)   # leading words of a longer personal name -> {record id: None}
+            reg = common._reg  # the links that tie one identity's records together (a person, its accounts, its addresses)
+            self._identity = {n for n, lk in reg.links.items() if lk.relation in ("ALIAS_OF", "HAS_ACCOUNT")}
+            for r in self.rec.values():
+                self.add_name(r)
+        return self._names
+
+    def add_name(self, r):
+        """Index a record under every name it goes by (its name fields, and the lookup fields: emails, handles ...)."""
+        if self._names is None:
+            return
+        spec = common._reg.records.get(r["type"])
+        if spec is None:
+            return
+        p = r["props"]
+        for f in [*extract_schema.names_of(spec), *extract_schema.LOOKUP_FIELDS]:
+            val = p.get(f)
+            for x in val if isinstance(val, list) else [val]:
+                if isinstance(x, str) and (k := name_key(x)) and r["id"] not in self._names[k]:
+                    self._names[k].append(r["id"])
+        full = p.get(extract_schema.PERSONAL_NAME)
+        words = name_key(full).split() if isinstance(full, str) else []
+        for n in range(1, len(words)):   # "emma", "emma van" for "Emma van Dijk"
+            self._prefix[" ".join(words[:n])][r["id"]] = None
+
+    def by_field(self, rtype, field, value):
+        """Records of `rtype` whose `field` holds this value (a pull request's number, a commit's sha): equal, or,
+        for a value of 7 characters or more written shorter than it is stored (a short sha), the one stored value
+        that starts with it."""
+        idx = self._fields.get((rtype, field))
+        if idx is None:
+            idx = self._fields[(rtype, field)] = collections.defaultdict(list)
+            for r in self.by_type[rtype]:
+                self.index_field(r, field, idx)
+        k = _field_key(value)
+        hits = idx.get(k, [])
+        if not hits and len(k) >= 7:
+            longer = [ids for stored, ids in idx.items() if stored.startswith(k)]
+            hits = longer[0] if len(longer) == 1 else []
+        return [self.rec[i] for i in hits]
+
+    def index_field(self, r, field, idx=None):
+        """Add one record to the (type, field) index (a record this stage just made)."""
+        idx = self._fields.get((r["type"], field)) if idx is None else idx
+        val = r["props"].get(field)
+        if idx is not None and val is not None and r["id"] not in idx[_field_key(val)]:
+            idx[_field_key(val)].append(r["id"])
+
+    def by_name_prefix(self, name, types):
+        """Records of `types` whose personal name is `name` followed by more words, where those words are the
+        value of another of that record's fields or the name of a record linked to it: "Lionel" is the record
+        "Lionel eng-orders" whose team (or id) is eng-orders. The rest of a name that is nothing of its own record
+        ("Noah" and "Noah Patel") is no match: a name alone never makes two records one."""
+        self._index()
+        key = name_key(name)
+        words = key.split()
+        if not words:
+            return []
+        out = []
+        for i in self._prefix.get(key, ()):
+            r = self.rec[i]
+            full = name_key(r["props"].get(extract_schema.PERSONAL_NAME) or "")
+            if r["type"] in types and full.startswith(key + " ") and full[len(key) + 1:] in self.own_values(r):
+                out.append(r)
+        return out
+
+    def own_values(self, r):
+        """Every value a record holds besides its name, and the names of the records linked to it, as name keys."""
+        vals = {name_key(str(v)) for k, v in r["props"].items()
+                if k != extract_schema.PERSONAL_NAME and not k.startswith("_") and isinstance(v, (str, int)) and not isinstance(v, bool)}
+        for lk in self.out[r["id"]] + self.inn[r["id"]]:
+            other = self.rec.get(lk["b"] if lk["a"] == r["id"] else lk["a"])
+            spec = common._reg.records.get(other["type"]) if other else None
+            if spec is not None:
+                vals |= {name_key(str(other["props"][f])) for f in extract_schema.names_of(spec) if other["props"].get(f)}
+        return vals - {""}
+
+    def by_first_name(self, name, types):
+        """Records of `types` whose personal name (full_name) starts with this one word: 'Emma' -> 'Emma Stone'."""
+        self._index()
+        k = name_key(name)
+        return [self.rec[i] for i in self._prefix.get(k, ()) if self.rec[i]["type"] in types and len(k.split()) == 1]
+
+    def resolve(self, name, types, prefer_tool=None):
+        """The records of `types` a text means by `name`: found by name, key, alias, email or login, directly or
+        through the records of the same identity (an address -> its account -> its person). Several records of
+        one person (their accounts in different tools) count as one: the one in `prefer_tool`, else the first by key."""
+        hits = [self.rec[i] for i in self._index().get(name_key(name), ())]
+        found = [r for r in hits if r["type"] in types]
+        seen, frontier = {r["id"] for r in hits}, hits
+        for _ in range(2):
+            if found:
+                break
+            nxt = []
+            for r in frontier:
+                for lk in self.out[r["id"]] + self.inn[r["id"]]:
+                    other = lk["b"] if lk["a"] == r["id"] else lk["a"]
+                    if lk["type"] in self._identity and other not in seen:
+                        seen.add(other)
+                        nxt.append(self.rec[other])
+            found, frontier = [r for r in nxt if r["type"] in types], nxt
+        if len(found) > 1:
+            owners = {tuple(sorted(lk["a"] for lk in self.inn[r["id"]] if lk["type"] == "HAS_ACCOUNT")) for r in found}
+            if len(owners) == 1 and owners != {()}:
+                found.sort(key=lambda r: (r["props"].get("source_tool") != prefer_tool, r["props"]["_key"]))
+                found = found[:1]
+        return found
+
     def is_bot(self, rid):
         for r in self.ends(rid, {"AUTHORED_BY", "FROM"}, direction="out"):
             p = r["props"]
             if p.get("is_bot") or p.get("kind") == "automation" or (p.get("login") or "").endswith("[bot]"):
                 return True
         return False
+
+
+def _field_key(value):
+    """A field value as the field index keys it: 174 and "174" alike, case and outer spaces aside."""
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    return str(value).strip().casefold()
+
+
+def name_key(s):
+    """A name as the index keys it: letters as typed apart from case, width and spacing; no @ or quotes around it."""
+    s = unicodedata.normalize("NFKC", s or "")
+    return re.sub(r"\s+", " ", s).strip(" \t\"'“”‘’<>()[],;:").lstrip("@").casefold()
 
 
 def _stub(r):
@@ -134,7 +298,8 @@ def _stub(r):
 
 STOP = set("""the and for with from into that this when not are was use add adds added fix fixes fixed make
 remove update support minor should can will which via its also more one new all when then than has have
-apache kafka flink jira github pull request issue""".split())
+pull request issue""".split())
+COMMON_SHARE = 0.05  # a word in more than this share of the titles (the product's own name, say) is not a rare word
 
 
 def tokens(text):
@@ -149,13 +314,14 @@ class Similar:
         df = collections.Counter(t for _, ts in self.entries for t in ts)
         n = max(len(self.entries), 1)
         self.idf = {t: math.log(n / c) for t, c in df.items()}
+        self.common = {t for t, c in df.items() if n >= 100 and c > n * COMMON_SHARE}
         self.index = collections.defaultdict(list)
         for i, (_, ts) in enumerate(self.entries):
             for t in ts:
                 self.index[t].append(i)
 
     def top(self, text, n=3, min_shared=2, exclude=()):
-        q = tokens(text)
+        q = tokens(text) - self.common
         scores, shared = collections.Counter(), collections.Counter()
         for t in q:
             for i in self.index.get(t, ()):
@@ -166,9 +332,41 @@ class Similar:
         return [self.entries[i][0] for i in best[:n]]
 
 
-def _clip(text, cap):
-    text = re.sub(r"\n{3,}", "\n\n", (text or "").strip())
-    return text if len(text) <= cap else text[:cap].rsplit(" ", 1)[0] + " …"
+def _clean(text):
+    """The text whole, with runs of blank lines closed up."""
+    return re.sub(r"\n{3,}", "\n\n", (text or "").strip())
+
+
+_QUOTED = re.compile(r"^\s*(?:>\s?)+")
+QUOTE_MARK = "[quoted lines of an earlier message, shown above, are left out]"
+
+
+def dequote(texts, counter=None, kind=""):
+    """A conversation's messages, oldest first, without the lines that only quote an earlier one of them.
+
+    A reply usually carries the messages before it again, each line marked ">". Such a line is left out only
+    when the same line is in an earlier message of this same conversation, which is shown on its own: nothing
+    is lost, and the conversation is not read once per reply. A quoted line from anywhere else stays."""
+    seen, out = set(), []
+    for text in texts:
+        kept, own, gap = [], [], False
+        for line in _clean(text).split("\n"):
+            m = _QUOTED.match(line)
+            body = re.sub(r"\s+", " ", line[m.end():] if m else line).strip().casefold()
+            if m and (not body or body in seen):
+                if body and not gap:
+                    kept.append(QUOTE_MARK)
+                    gap = True
+                if counter is not None:
+                    counter[kind] += len(line) + 1
+                continue
+            if body:
+                gap = False
+                own.append(body)
+            kept.append(line)
+        seen.update(own)
+        out.append("\n".join(kept).strip())
+    return out
 
 
 def _first_line(text):
@@ -177,25 +375,26 @@ def _first_line(text):
 
 # ---------------------------------------------------------------- items
 
-def ticket_item(v, t, label, cap=CANDIDATE_CAP):
+def ticket_item(v, t, label):
     p = t["props"]
-    return Item(label, t["id"], f"Ticket {p.get('identifier')}: {p.get('title') or ''}", _clip(v.description(t["id"]), cap), "Ticket")
+    return Item(label, t["id"], f"Ticket {p.get('identifier')}: {p.get('title') or ''}", _clean(v.description(t["id"])), "Ticket")
 
 
-def pr_item(v, pr, label, cap=CANDIDATE_CAP):
+def pr_item(v, pr, label):
     p = pr["props"]
     title = f"Pull request #{p.get('number')}: {p.get('title') or ''} (branch {p.get('head_ref') or '?'}, {p.get('state') or '?'})"
-    return Item(label, pr["id"], title, _clip(v.description(pr["id"]), cap), "PullRequest")
+    return Item(label, pr["id"], title, _clean(v.description(pr["id"])), "PullRequest")
 
 
-def commit_item(v, c, label, cap=CANDIDATE_CAP):
+def commit_item(v, c, label):
     p = c["props"]
-    return Item(label, c["id"], f"Commit {p['sha'][:10]}: {_first_line(p.get('message'))}", _clip(p.get("message"), cap), "Commit")
+    return Item(label, c["id"], f"Commit {p['sha'][:10]}: {_first_line(p.get('message'))}", _clean(p.get("message")), "Commit")
 
 
-def comment_items(v, rid, start, n=MAX_SOURCES - 1, cap=TEXT_CAP // 2):
+def comment_items(v, rid, start):
+    """Every comment, whole (a judge prompt larger than the window is fitted in fill.judge_prompt)."""
     return [Item(f"S{start + i}", c["id"], f"Comment by {v.author(c['id'])} ({(c['props'].get('at') or '')[:10]})",
-                 _clip(c["props"]["text"], cap), c["type"]) for i, c in enumerate(v.comments(rid)[:n])]
+                 _clean(c["props"]["text"]), c["type"]) for i, c in enumerate(v.comments(rid))]
 
 
 def decision_item(v, d, label):
@@ -229,7 +428,7 @@ def pr_ticket(v):
             skipped["marked as needing no ticket (MINOR / hotfix)"] += 1
             continue
         p, desc = pr["props"], v.description(pr["id"])
-        sources = [pr_item(v, pr, "S1", TEXT_CAP)] + comment_items(v, pr["id"], 2)
+        sources = [pr_item(v, pr, "S1")] + comment_items(v, pr["id"], 2)
         text = " ".join([p.get("title") or "", p.get("head_ref") or "", desc] + [s.text for s in sources[1:]])
         named = _ordered(key_rx.findall(text))
         cands = [tickets[k] for k in named if k in tickets]
@@ -272,7 +471,7 @@ def commit_pr(v):
         tasks.append(Task("commit_pr", c["id"], f"Which pull request, if any, did commit {c['props']['sha'][:10]} land?",
                           "the commit is that PR's change (same ticket and same change, or the message names the PR). "
                           "A PR about a different change, or another branch's backport, is a reject.",
-                          [commit_item(v, c, "S1", TEXT_CAP)],
+                          [commit_item(v, c, "S1")],
                           [pr_item(v, v.rec[i], f"C{n + 1}") for n, i in enumerate(cands[:MAX_CANDIDATES])],
                           {"link": "MERGED_AS", "from": "choice", "own": {"valid_from": c["props"].get("committed_at")}}))
     return tasks, skipped
@@ -292,7 +491,7 @@ def ticket_fix(v):
         if v.ends(t["id"], {"IMPLEMENTS", "LINKS_TO"}, {"PullRequest", "Commit"}) or any(
                 v.ends(c["id"], {"LINKS_TO", "MENTIONS"}, {"PullRequest", "Commit"}, "out") for c in v.comments(t["id"])):
             continue
-        sources = [ticket_item(v, t, "S1", TEXT_CAP)] + comment_items(v, t["id"], 2)
+        sources = [ticket_item(v, t, "S1")] + comment_items(v, t["id"], 2)
         text = " ".join(s.text for s in sources)
         shas = {s for s in SHA.findall(text) if re.search(r"[a-f]", s) and re.search(r"\d", s)}
         cands = [c["id"] for c in commits if any(c["props"]["sha"].startswith(s) for s in shas)]
@@ -324,8 +523,9 @@ def email_topic(v):
         if any(v.ends(m["id"], {"DISCUSSES", "ANNOUNCES", "MENTIONS", "MADE_IN"}, {"Ticket", "Decision", "PullRequest"}) for m in msgs):
             continue
         human = [m for m in msgs if not v.is_bot(m["id"])][:3]
+        texts = dequote([m["props"].get("text") for m in human], v.quoted, "email_topic")
         sources = [Item(f"S{i + 1}", m["id"], f"Email from {v.author(m['id'])}: {m['props'].get('subject')}",
-                        _clip(m["props"].get("text"), TEXT_CAP // (1 if i == 0 else 2)), "EmailMessage") for i, m in enumerate(human)]
+                        texts[i], "EmailMessage") for i, m in enumerate(human)]
         cands = sim.top(f"{th['props'].get('normalized_subject')} {sources[0].text[:400]}", n=4)
         if not cands:
             skipped["no candidate ticket or proposal"] += 1
@@ -394,6 +594,7 @@ def identity(v):
 
 def decision_status(v):
     tasks, skipped = [], collections.Counter()
+    statuses = list(common._reg.record("Decision").fields["status"].enum)  # the schema's own values
     for d in v.typed("Decision"):
         if d["props"].get("status"):
             continue
@@ -403,11 +604,11 @@ def decision_status(v):
             skipped["no page text"] += 1
             continue
         tasks.append(Task("decision_status", d["id"], f"What status does this page give the proposal '{d['props'].get('statement')}'?",
-                          "the page states the status (a 'Current state' line, a vote result, 'accepted', 'adopted', "
-                          "'under discussion', 'superseded by' ...). If the page says rejected, discarded, withdrawn or "
-                          "dormant, or says nothing, reject: the schema has no value for those.",
-                          [Item("S1", docs[0]["id"], f"Page: {docs[0]['props'].get('title')}", _clip(text, 2500), "Document")],
-                          [Item(s, None, s) for s in DECISION_STATUS], {"field": "status"}))
+                          "the page states the status (a status or state line, a vote result, 'accepted', 'adopted', "
+                          "'under discussion', 'superseded by' ...). If the page says nothing, or gives a status that is "
+                          "none of the values, reject.",
+                          [Item("S1", docs[0]["id"], f"Page: {docs[0]['props'].get('title')}", _clean(text), "Document")],
+                          [Item(s, None, s) for s in statuses], {"field": "status"}))
     return tasks, skipped
 
 
@@ -420,11 +621,30 @@ def _linked_work(v, msgs):
     return ids[0] if len(ids) == 1 else None
 
 
+def windowed(v, kind, items, share=1.0):
+    """Items in consecutive windows that fit one call of this kind, cut only between items. An item larger
+    than a whole window (one huge message or piece) is cut at line ends into items with the same record id."""
+    room = v.room(kind, share)
+    flat = []
+    for it in items:
+        if len(it.title) + len(it.text) + 16 <= room:
+            flat.append(it)
+            continue
+        v.cut[kind] += 1
+        repeat = fill_docs.header_line(it.text) if it.type == "table" else ""
+        parts = fill_budget.split_text(it.text, room - len(it.title) - 40, repeat)
+        flat += [Item(it.label, it.id, f"{it.title} (part {i + 1} of {len(parts)})", part, it.type) for i, part in enumerate(parts)]
+    for n, it in enumerate(flat):  # labels are unique across the whole text, so a window's answer names its item
+        it.label = f"{it.label[0]}{n + 1}"
+    return fill_budget.pack(flat, room, size=lambda it: len(it.title) + len(it.text) + 16)
+
+
 def knowledge(v):
     """Conversations worth reading: mail threads, chat and forum threads, PR conversations and ticket comment
-    threads with real back-and-forth."""
+    threads with real back-and-forth. Every message is read: a conversation longer than one call can carry
+    becomes consecutive windows, cut between messages."""
     tasks, skipped = [], collections.Counter()
-    by_key = {}  # existing decisions by the key their statement starts with (KIP-1340, FLIP-547, ...)
+    by_key = {}  # existing decisions by the key their statement starts with (ABC-123)
     for d in v.typed("Decision"):
         if d["props"].get("identifier"):
             by_key.setdefault(d["props"]["identifier"], d["id"])
@@ -432,23 +652,27 @@ def knowledge(v):
             by_key.setdefault(m.group(1), d["id"])
 
     def add(subject, title, msgs, about=None):
-        msgs = [m for m in msgs if not v.is_bot(m["id"])][:MAX_SOURCES]
-        if len(msgs) < 2 or sum(len(m["props"].get("text") or "") for m in msgs) < 600:
+        msgs = [m for m in msgs if not v.is_bot(m["id"])]
+        if len(msgs) < 2 or sum(len(m["props"].get("text") or "") for m in msgs) < MIN_CONVERSATION:
             skipped["too short to hold knowledge"] += 1
             return
-        sources = [Item(f"S{i + 1}", m["id"], f"{m['type']} by {v.author(m['id'])} ({(m['props'].get('sent_at') or m['props'].get('at') or '')[:10]})",
-                        _clip(m["props"].get("text"), TEXT_CAP), m["type"]) for i, m in enumerate(msgs)]
+        texts = dequote([m["props"].get("text") for m in msgs], v.quoted, "knowledge")
+        items = [Item("S", m["id"], f"{m['type']} by {v.author(m['id'])} ({(m['props'].get('sent_at') or m['props'].get('at') or '')[:10]})",
+                      text, m["type"]) for m, text in zip(msgs, texts) if text]
         named = _ordered(by_key[k] for k in re.findall(r"\b[A-Z][A-Z0-9]*-\d+\b", title) if k in by_key)
-        tasks.append(Task("knowledge", subject["id"], title, "", sources, [],
-                          {"about": subject["id"] if subject["type"] in ("Ticket", "PullRequest") else about,
-                           # a decision taken here about an existing proposal is that proposal, not a new record
-                           "decision": named[0] if len(named) == 1 else None}))
+        wins = windowed(v, "knowledge", items)
+        for i, sources in enumerate(wins):
+            part = f"part {i + 1} of {len(wins)} of this conversation; the other parts are read separately" if len(wins) > 1 else ""
+            tasks.append(Task("knowledge", subject["id"], title, "", sources, [],
+                              {"about": subject["id"] if subject["type"] in ("Ticket", "PullRequest") else about,
+                               # a decision taken here about an existing proposal is that proposal, not a new record
+                               "decision": named[0] if len(named) == 1 else None}, context=part))
 
     for th in v.typed("EmailThread"):
         msgs = sorted(v.ends(th["id"], {"IN"}, {"EmailMessage"}, "in"), key=lambda m: m["props"].get("sent_at") or "")
         if msgs:
             add(msgs[0], f"Mail thread: {th['props'].get('normalized_subject')}", msgs, _linked_work(v, msgs))
-    for th in v.typed("Thread"):  # chat threads (Slack) and forum topics (Discourse); review threads are PR comments
+    for th in v.typed("Thread"):  # chat threads and forum topics; review threads are PR comments
         if th["props"].get("kind") not in ("chat", "discussion"):
             continue
         msgs = sorted(v.ends(th["id"], {"IN"}, {"Message", "Comment"}, "in"), key=lambda m: m["props"].get("at") or "")
@@ -464,42 +688,60 @@ def knowledge(v):
     return tasks, skipped
 
 
-DOC_RECENT_DAYS = 120  # wiki pages edited this close to the newest edit are read; older pages were read before
+def doc_windows(v, kind, doc, units, share=1.0):
+    """[(context, [Item])]: one document's units as consecutive windows for `kind`. Each window is headed by the
+    document's title, its outline and where the window sits, so a passage is never read without its place."""
+    room = v.room(kind, share)
+    outline = fill_docs.outline_text(doc, room // 8)
+    room -= len(outline) + len(doc.title) + 200
+    wins, cut = fill_docs.windows(units, room)
+    v.cut[kind] += cut
+    out, n = [], 0
+    for i, win in enumerate(wins):
+        items = []
+        for u in win:
+            n += 1
+            where = (u.heading or doc.title) + (f" ({u.kind})" if u.kind != "text" else "") + (f" (part {u.part} of this passage)" if u.part else "")
+            items.append(Item(f"P{n}", u.id, where, u.text, u.kind))
+        ctx = [f"DOCUMENT: {doc.title}"]
+        if outline:
+            ctx += ["OUTLINE OF THE WHOLE DOCUMENT", outline]
+        if len(wins) > 1:
+            ctx.append(f"THIS IS PART {i + 1} OF {len(wins)}, from \"{win[0].heading or doc.title}\" to \"{win[-1].heading or doc.title}\". "
+                       "The other parts are read separately: report only what this part states.")
+        out.append(("\n".join(ctx), items))
+    return out
 
 
 def doc_knowledge(v):
-    """Documents: stored files (docs adapter) and wiki pages edited recently, read whole for guidelines,
-    decisions and how-tos. A document is one source, so the quote must be in its text."""
-    tasks, skipped = [], collections.Counter()
-    edits = {}
-    for d in v.typed("Document") + v.typed("File"):
-        cvs = [v.rec[lk["a"]] for lk in v.inn[d["id"]] if lk["type"] == "VERSION_OF"]
-        when = max((c["props"].get("valid_from") or "" for c in cvs), default="")
-        if cvs:
-            edits[d["id"]] = when
-    newest = max(edits.values(), default="")
-    cutoff = ""
-    if newest:
-        import datetime as _dt
-        cutoff = (_dt.datetime.strptime(newest[:10], "%Y-%m-%d") - _dt.timedelta(days=DOC_RECENT_DAYS)).strftime("%Y-%m-%d")
-    for did, when in edits.items():
-        d = v.rec[did]
-        p = d["props"]
-        is_stored = p["source_tool"] == "docs" or (d["type"] == "File" and p.get("kind") == "doc")
-        if d["type"] == "Document" and when and when[:10] < cutoff:
-            skipped["wiki page not edited recently"] += 1
+    """Every document, read whole for the six knowledge types (extract, then judge). Kept for comparison with
+    doc_facts, which reads the same text once for these and for everything else the schema supports."""
+    docs, skipped = v.docs()
+    tasks, skipped = [], collections.Counter(skipped)
+    for doc in docs:
+        units = fill_docs.text_units(doc, v.claimed)
+        if not units:
+            skipped["only tables (read by table_map)"] += 1
             continue
-        if d["type"] == "File" and not is_stored:
-            continue
-        text = v.description(did)
-        if len(text) < 600:
-            skipped["too short to hold knowledge"] += 1
-            continue
-        title = p.get("title") or p.get("name") or p.get("path")
-        src = Item("S1", did, f"{'Page' if d['type'] == 'Document' else 'Document'}: {title}", _clip(text, DOC_TEXT_CAP), d["type"])
-        tasks.append(Task("doc_knowledge", did, f"Document: {title}", "", [src], [], {"about": None, "decision": None}))
+        for ctx, items in doc_windows(v, "doc_knowledge", doc, units):
+            tasks.append(Task("doc_knowledge", doc.rec["id"], f"Document: {doc.title}", "", items, [],
+                              {"about": None, "decision": None, "doc": doc.rec["id"], "quality": doc.quality}, context=ctx))
     return tasks, skipped
 
 
+def _doc_facts(v):
+    from . import extract_facts
+    return extract_facts.build(v)
+
+
+def _table_map(v):
+    from . import extract_tables
+    return extract_tables.build(v)
+
+
 BUILDERS = {"pr_ticket": pr_ticket, "commit_pr": commit_pr, "ticket_fix": ticket_fix, "email_topic": email_topic,
-            "identity": identity, "decision_status": decision_status, "knowledge": knowledge, "doc_knowledge": doc_knowledge}
+            "identity": identity, "decision_status": decision_status, "knowledge": knowledge,
+            "table_map": _table_map, "doc_facts": _doc_facts, "doc_knowledge": doc_knowledge}
+# what a run asks unless told otherwise: doc_knowledge is left out because doc_facts reads the same documents for
+# the same six types and more, in one call per window instead of two
+DEFAULT_KINDS = [k for k in BUILDERS if k != "doc_knowledge"]

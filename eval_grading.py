@@ -4,7 +4,7 @@ Two question formats:
 
   * this kit's own (make_eval_set.py): {"graph", "as_of", "questions": [{id, category, question, asker,
     gold: {must: [[any of], ...], none: bool}}]}
-  * the shared Kafka set (kafka_shared_queries.jsonl, one question per line): id, pillar, category,
+  * the shared shape (kafka_shared_queries.jsonl, acme_queries.jsonl; one question per line): id, pillar, category,
     difficulty, question, gold_answer, acceptable_variants, answer_checklist [{id, fact, required}],
     must_not_say, grading ("script" | "judge"), expected_behavior ("answer" | "abstain"), as_of
 
@@ -21,6 +21,7 @@ How an answer is graded:
 from __future__ import annotations
 
 import json
+import os
 import re
 import unicodedata
 from pathlib import Path
@@ -106,7 +107,8 @@ def judge_prompt(q: dict, answer: str) -> str:
     facts = q["checklist"] or [{"id": "c1", "fact": q.get("gold_answer") or "", "required": True}]
     lines = [f"- {c['id']} ({'required' if c.get('required', True) else 'optional'}): {c['fact']}" for c in facts]
     return "\n".join([
-        "You grade an answer to a question about a software project's engineering data. Judge only whether the",
+        "You grade an answer to a question about an organisation's records (its code, tickets, documents, people",
+        "and conversations). Judge only whether the",
         "ANSWER states each fact; wording may differ, and extra correct detail is fine. A fact stated wrongly is not met.",
         "Differences in accents, case or formatting of a name (Harmadás / Harmadas, mjsax / MJSAX) are not errors.",
         "", f"QUESTION: {q['question']}", "", f"GOLD ANSWER: {q.get('gold_answer') or ''}", "", "FACTS:", *lines,
@@ -139,7 +141,10 @@ async def grade(q: dict, answer: str, judge=None) -> dict:
     if judge is None:
         return {**out, "pass": None, "method": "judge (not run)", "missing": []}
     try:
-        v = await judge.guided_json([{"role": "user", "content": judge_prompt(q, answer)}], JUDGE_SCHEMA, max_tokens=700)
+        # A reasoning model's thinking counts against the cap, so it is not small (hosts under LLM_OUTPUT_CAP=window
+        # ignore it and allow the model's own maximum).
+        v = await judge.guided_json([{"role": "user", "content": judge_prompt(q, answer)}], JUDGE_SCHEMA,
+                                    max_tokens=int(os.environ.get("EKG_JUDGE_MAX_TOKENS", "4096")))
     except Exception as e:  # a judge failure is reported, never counted as a pass
         return {**out, "pass": None, "method": "judge (error)", "missing": [], "judge_error": f"{type(e).__name__}: {e}"[:200]}
     met = {c.get("id"): bool(c.get("met")) for c in v.get("checklist") or []}

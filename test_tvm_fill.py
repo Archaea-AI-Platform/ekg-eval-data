@@ -106,9 +106,13 @@ def tvm_checks(check):
           g.linked("IMPORTS", syms["python.tvm.relax.pass"], syms["python.tvm.tir.shape"]))
 
     roadmap = g.one("File", name="roadmap.xlsx")
-    pieces = [r for r in g.recs if r["type"] == "Piece" and g.linked("PART_OF", r, roadmap)]
-    check("tvm: the spreadsheet is a File with one Piece per sheet, which MENTIONS issue 99",
-          len(pieces) == 1 and g.linked("MENTIONS", pieces[0], i99))
+    # a sheet is a DocSection of the file, and its rows are a Piece of that section (before: a Piece hung
+    # straight on the File, with no section record at all)
+    sheets = [r for r in g.recs if r["type"] == "DocSection" and g.linked("SECTION_OF", r, roadmap)]
+    pieces = [r for r in g.recs if r["type"] == "Piece" and any(g.linked("PART_OF", r, s) for s in sheets)]
+    check("tvm: the spreadsheet is a File with a DocSection per sheet, whose one Piece MENTIONS issue 99",
+          len(sheets) == 1 and sheets[0]["props"]["kind"] == "sheet" and len(pieces) == 1
+          and pieces[0]["props"]["kind"] == "table" and g.linked("MENTIONS", pieces[0], i99))
 
     bob = g.one("Person", full_name="Bob Kumar")
     tools = {g.by_id[lk["b"]]["props"]["source_tool"] for lk in g.links if lk["type"] == "HAS_ALIAS" and lk["a"] == bob["id"]}

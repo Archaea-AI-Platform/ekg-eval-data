@@ -1,0 +1,42 @@
+From tracker-bot@acme.io Thu Oct  1 09:10:00 2026
+From: Tracker <tracker-bot@acme.io>
+To: eng@acme.io
+Subject: ENG-1 was moved to In Progress
+Date: Thu, 01 Oct 2026 09:10:00 +0000
+Message-ID: <t1@acme.io>
+List-Id: <eng.acme.io>
+
+Bob Ruiz moved ENG-1 to In Progress.
+
+From alice@acme.io Fri Oct  2 10:00:00 2026
+From: Alice Ng <alice@acme.io>
+To: eng@acme.io
+Subject: [VOTE] RFC-7 retry budget for refunds
+Date: Fri, 02 Oct 2026 10:00:00 +0000
+Message-ID: <v1@acme.io>
+List-Id: <eng.acme.io>
+
+Please vote on RFC-7. It relates to ENG-2.
+
+From bob@acme.io Fri Oct  2 11:00:00 2026
+From: Bob Ruiz <bob@acme.io>
+To: eng@acme.io
+Subject: Re: [VOTE] RFC-7 retry budget for refunds
+Date: Fri, 02 Oct 2026 11:00:00 +0000
+Message-ID: <v2@acme.io>
+In-Reply-To: <v1@acme.io>
+References: <v1@acme.io>
+List-Id: <eng.acme.io>
+
++1 (binding)
+
+From ci@acme.io Fri Oct  2 12:00:00 2026
+From: CI <ci@acme.io>
+To: eng@acme.io
+Subject: nightly build failed
+Date: Fri, 02 Oct 2026 12:00:00 +0000
+Message-ID: <c1@acme.io>
+List-Id: <eng.acme.io>
+
+ENG-1 is mentioned in a CI log, which is noise.
+

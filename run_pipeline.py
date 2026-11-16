@@ -4,7 +4,7 @@
   2. LLM fill    fill_graph's stage          -> <out>/llm/records.jsonl, links.jsonl, ledger.jsonl, patterns.json
   3. save        save_graph's SQLite export  -> <out>/graph.sqlite (ekg_registry_*, ekg_records, ekg_links)
 
-    export LLM_BACKEND=openrouter OPENROUTER_API_KEYS=<key> EKG_LLM_MODEL=mistralai/devstral-2512
+    export LLM_BACKEND=openrouter OPENROUTER_API_KEYS=<key> EKG_LLM_MODEL=meta/muse-glimmer-30b
     python -I ekg-eval-data/run_pipeline.py --data ekg-eval-raw/apache-kafka
     python -I ekg-eval-data/run_pipeline.py --data ekg-eval-raw/apache-flink --llm skip     # no LLM stage
     python -I ekg-eval-data/run_pipeline.py --data ekg-eval-raw/apache-kafka ekg-eval-raw/apache-tvm \
@@ -20,7 +20,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 from ekg_adapters import fill, pipeline, sqlite_store  # noqa: E402
-from ekg_adapters.fill_tasks import BUILDERS  # noqa: E402
+from ekg_adapters.fill_tasks import BUILDERS, DEFAULT_KINDS  # noqa: E402
 
 
 def main() -> int:
@@ -31,11 +31,16 @@ def main() -> int:
     ap.add_argument("--out", default=None, help="default ekg-eval-out/<data folder name> (one --data only)")
     ap.add_argument("--combined", default=None, help="also save every download's graph into this one SQLite file")
     ap.add_argument("--llm", choices=("run", "dry", "skip"), default="run", help="run the LLM stage, only count its tasks, or skip it")
-    ap.add_argument("--kinds", default=",".join(BUILDERS))
-    ap.add_argument("--limit", type=int, default=None, help="ask at most this many new tasks per kind")
-    ap.add_argument("--concurrency", type=int, default=4)
+    ap.add_argument("--kinds", default=",".join(DEFAULT_KINDS), help=f"comma list of {', '.join(BUILDERS)}")
+    ap.add_argument("--limit", type=int, default=None, help="ask at most this many new tasks per kind (test runs)")
+    ap.add_argument("--docs", type=int, default=None, metavar="N", help="read only N documents, evenly spaced (test runs)")
+    ap.add_argument("--concurrency", type=int, default=16, help="model calls in flight at once")
+    ap.add_argument("--window-tokens", type=int, default=None, help="the model's context window, when the backend cannot say")
+    ap.add_argument("--max-reply-tokens", type=int, default=None, help="the provider's cap on one reply, when the backend cannot say")
     args = ap.parse_args()
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)  # a redirected log stays current
+    if bad := [k for k in args.kinds.split(",") if k not in BUILDERS]:
+        ap.error(f"unknown kinds: {bad}")
 
     qm = Path(args.query_master)
     if args.out and len(args.data) > 1:
@@ -64,10 +69,11 @@ def one(data, out, qm, args) -> int:
 
     if args.llm != "skip":
         print(f"2. LLM fill ({args.llm})")
-        res = fill.run(out, qm, None, args.kinds.split(","), args.limit, args.llm, 0, args.concurrency)
+        res = fill.run(out, qm, None, args.kinds.split(","), args.limit, args.llm, 0, args.concurrency,
+                       window_tokens=args.window_tokens, docs=args.docs, max_reply_tokens=args.max_reply_tokens)
         for k, r in res["kinds"].items():
-            print(f"   {k:<16} to ask {r['to_ask']:>5,}  accepted {r.get('accepted', 0):>5,}  rejected {r.get('rejected', 0):>5,}  "
-                  f"error {r.get('error', 0):>4,}")
+            print(f"   {k:<16} to ask {r['to_ask']:>6,}  accepted {r.get('accepted', 0):>6,}  rejected {r.get('rejected', 0):>6,}  "
+                  f"error {r.get('error', 0):>4,}  prompt chars {r.get('prompt_chars_total', 0):>12,}")
     print("3. save")
     saved = sqlite_store.save(out, qm)
     print(f"   {saved['sqlite']} ({saved['size_mb']} MB) records {saved['records_by_stage']} links {saved['links_by_stage']}")

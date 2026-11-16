@@ -1,8 +1,8 @@
 """Access scopes: one AccessScope per place, granted to whoever the tool grants it to.
 
-Every Apache place is public, so each scope is granted to the Public principal at
-read level. A private deployment replaces those grants with the tool's real members
-(repo collaborators, channel members, Jira roles); the records keep the same scope.
+A public place (an open-source project's repo, tracker, lists) is granted to the Public
+principal at read level. A private one is granted to the tool's real members instead
+(repo collaborators, channel members, tracker roles); the records keep the same scope.
 """
 
 from .common import Graph
@@ -11,7 +11,7 @@ from .common import Graph
 def place(g: Graph, tool: str, kind: str, native: str, history: str = "all", public: bool = True):
     """Create the AccessScope for a place and return the scope to put on its records.
 
-    public=True grants it to the Public principal (every Apache place); otherwise the
+    public=True grants it to the Public principal (a public source); otherwise the
     adapter grants it to the tool's real members with grant()."""
     public_principal = g.ctx.get("public")
     if public is not False and public_principal is None:

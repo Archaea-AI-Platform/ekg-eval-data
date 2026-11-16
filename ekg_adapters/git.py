@@ -121,30 +121,31 @@ def map_git(g: Graph, d: Path):
         rows.append(c)
     # commits a release tag points to that are not on the default branch (a release branch's head): read from
     # repo.git, so "which tag" questions land on a real commit
-    on_trunk = {c["sha"] for c in rows}
-    extra = repo_commits(d, sorted(set(g.ctx.get("tag_targets", ())) - on_trunk))
+    on_default = {c["sha"] for c in rows}
+    extra = repo_commits(d, sorted(set(g.ctx.get("tag_targets", ())) - on_default))
     for c in extra:
-        c["_off_trunk"] = True
+        c["_off_default"] = True
     rows += extra
     g.notes["git: commits release tags point to, off the default branch"] = len(extra)
-    # commits on the release branches that the default branch does not have (cherry-picks, version bumps)
-    released = release_branch_commits(d, on_trunk | {c["sha"] for c in extra}, s.get("release_branch_since", "2024-01-01"),
-                                      branch)
+    # commits on the release branches that the default branch does not have (cherry-picks, version bumps); which
+    # branches are release branches, and from when, are the project's settings
+    released = release_branch_commits(d, on_default | {c["sha"] for c in extra}, branch, s.get("release_branches"),
+                                      s.get("release_branch_since"))
     for c in released:
-        c["_off_trunk"] = True
+        c["_off_default"] = True
     rows += released
     g.notes["git: release-branch commits not on the default branch"] = len(released)
     tag_of = first_tags(d, [c["sha"] for c in rows])  # the earliest tag holding each commit
     g.notes["git: commits with the first tag that contains them"] = len(tag_of)
-    picked = []  # (release-branch commit, the PR its subject names): linked to that PR's trunk commit below
+    picked = []  # (release-branch commit, the PR its subject names): linked to that PR's default-branch commit below
     for c in rows:
         authored, committed = utc(c["authored_at"]), utc(c["committed_at"])
         off = re.search(r"([+-])(\d\d):?(\d\d)$", c["authored_at"] or "")
         co = re.findall(r"^Co-authored-by: (.+?) <([^>]+)>$", c["message"], re.M)
         commit = g.rec("Commit", "git", c["sha"], {
             "sha": c["sha"], "message": c["message"], "authored_at": authored, "committed_at": committed,
-            "on_default_branch": not c.get("_off_trunk"),
-            "branch": c.get("_branch") or (None if c.get("_off_trunk") else branch), "first_tag": tag_of.get(c["sha"]),
+            "on_default_branch": not c.get("_off_default"),
+            "branch": c.get("_branch") or (None if c.get("_off_default") else branch), "first_tag": tag_of.get(c["sha"]),
             "co_authors": [f"{n} <{e}>" for n, e in co] or None,
             "author_tz_offset": (1 if off.group(1) == "+" else -1) * (int(off.group(2)) * 60 + int(off.group(3))) if off else None,
         }, scope, acl_from=repo)
@@ -173,7 +174,7 @@ def map_git(g: Graph, d: Path):
         subject = c["message"].split("\n")[0]
         m = PRNUM.search(subject)
         pr_num = int(m.group(1)) if m else None
-        if pr_num and c.get("_off_trunk"):  # a copy on a release branch: the PR merged as its trunk commit
+        if pr_num and c.get("_off_default"):  # a copy on a release branch: the PR merged as its default-branch commit
             picked.append((commit, pr_num))
         elif pr_num:
             g.ref(commit, "MERGED_AS", "PullRequest", pr_num, "convention", 0.95, stub=True, reverse=True,
@@ -195,14 +196,14 @@ def map_git(g: Graph, d: Path):
         for pos, parent in enumerate(c["parents"]):
             if parent in commits:
                 g.link("PARENT", commits[c["sha"]], commits[parent], "field", position=pos)
-    trunk_by_pr = {}
+    default_by_pr = {}
     for c in rows:
-        if not c.get("_off_trunk"):
+        if not c.get("_off_default"):
             m = PRNUM.search(c["message"].split("\n")[0])
             if m:
-                trunk_by_pr.setdefault(int(m.group(1)), commits[c["sha"]])
+                default_by_pr.setdefault(int(m.group(1)), commits[c["sha"]])
     for commit, num in picked:
-        if num in trunk_by_pr:
-            g.link("CHERRY_PICKED_FROM", commit, trunk_by_pr[num], "convention", 0.9, kind="cherry_pick")  # same PR
-    g.notes["git: release-branch commits linked to their trunk original (same PR)"] = sum(n in trunk_by_pr for _, n in picked)
+        if num in default_by_pr:
+            g.link("CHERRY_PICKED_FROM", commit, default_by_pr[num], "convention", 0.9, kind="cherry_pick")  # same PR
+    g.notes["git: release-branch commits linked to their default-branch original (same PR)"] = sum(n in default_by_pr for _, n in picked)
     g.ctx["git_emails"] = emails

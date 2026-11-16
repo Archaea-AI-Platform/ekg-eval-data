@@ -10,20 +10,34 @@ from __future__ import annotations
 
 import collections
 import datetime as dt
+import functools
 import html
 import json
 import re
 from html.parser import HTMLParser
 from pathlib import Path
 
-TENANT = "apache"
-SECRET = "ekg-eval-secret"  # ids only need to be stable within one tenant's run
+TENANT = "default"          # the run sets it from the manifest (set_tenant); never a project's name here
+SECRET = "ekg-eval-secret"  # ids only need to be stable within one tenant's run; a manifest's id_secret replaces it
 
-# Which pillar a record belongs to, by the tool that produced it (for the cross-pillar counts).
-PILLAR_OF_TOOL = {"asf": "People", "email": "People", "jira": "Tickets", "linear": "Tickets", "github": "Code",
-                  "git": "Code", "mail": "Conversations", "slack": "Conversations", "forum": "Conversations",
-                  "confluence": "Documents", "docs": "Documents",
+# Which pillar a record belongs to, by the tool that produced it (for the cross-pillar counts). A tool that is
+# not listed (a new connector's) takes the pillar of the record's type from the registry: see pillar_of().
+PILLAR_OF_TOOL = {"directory": "People", "asf": "People", "email": "People", "jira": "Tickets", "linear": "Tickets",
+                  "github": "Code", "git": "Code", "mail": "Conversations", "slack": "Conversations",
+                  "forum": "Conversations", "confluence": "Documents", "docs": "Documents",
                   "derived": "Knowledge", "ekg": "Access"}
+
+
+def pillar_of(record) -> str:
+    """A record's pillar: by its tool when the tool is known, else by its type in the registry, else "Other"."""
+    tool = record["props"].get("source_tool")
+    if tool in PILLAR_OF_TOOL:
+        return PILLAR_OF_TOOL[tool]
+    try:
+        pillars = _reg.record(record["type"]).pillars
+    except Exception:
+        pillars = ()
+    return pillars[0].capitalize() if pillars else "Other"
 
 _reg = _ids = _vrec = _vlink = None
 
@@ -79,57 +93,21 @@ def jira_text(markup):
     return t.strip()
 
 
-class _Sections(HTMLParser):
-    """Confluence storage XHTML -> [(level, heading, text)]; level 0 is text before the first heading."""
-
-    def __init__(self):
-        super().__init__(convert_charrefs=True)
-        self.sections, self.level, self.heading, self.buf, self.in_h = [], 0, "", [], None
-        self.href, self.anchor_at = None, 0
-
-    def handle_starttag(self, tag, attrs):
-        a = dict(attrs)
-        if re.fullmatch(r"h[1-6]", tag):
-            self._flush()
-            self.in_h, self.heading = int(tag[1]), ""
-        elif tag in ("p", "li", "tr", "br", "div"):
-            self.buf.append("\n")
-        elif tag == "a" and a.get("href"):  # keep where a link points, not only its words
-            self.href, self.anchor_at = a["href"], len(self.buf)
-        elif tag == "ri:url" and a.get("ri:value"):  # a Confluence external link
-            self.buf.append(f" <{a['ri:value']}>")
-
-    def handle_endtag(self, tag):
-        if tag == "a" and self.href:
-            words = "".join(self.buf[self.anchor_at:])
-            if self.href not in words and not self.href.startswith("#"):
-                self.buf.append(f" <{self.href}>")
-            self.href = None
-        if self.in_h and tag == f"h{self.in_h}":
-            self.level, self.in_h = self.in_h, None
-
-    def handle_data(self, data):
-        if self.in_h:
-            self.heading += data
-        else:
-            self.buf.append(data)
-
-    def _flush(self):
-        text = re.sub(r"\n\s*\n+", "\n", "".join(self.buf)).strip()
-        if text or self.heading:
-            self.sections.append((self.level, html.unescape(self.heading.strip()), text))
-        self.buf = []
-
-    def close(self):
-        super().close()
-        self._flush()
-
-
 def xhtml_sections(body):
-    p = _Sections()
-    p.feed(body or "")
-    p.close()
-    return p.sections
+    """Confluence storage XHTML or HTML -> [(level, heading, text)]; level 0 is text before the first heading.
+    Kept for callers that want the old shape; the reading is done by doctext (code blocks, links, tables kept)."""
+    from .doctext import read_confluence
+    out, level, heading, buf = [], 0, "", []
+    for b in read_confluence(body or "").blocks:
+        if b.kind == "heading":
+            if buf or heading:
+                out.append((level, heading, "\n".join(buf)))
+            level, heading, buf = b.level, b.text, []
+        else:
+            buf.append(b.render())
+    if buf or heading:
+        out.append((level, heading, "\n".join(buf)))
+    return out
 
 
 GIT_READ = ["-c", "core.quotePath=false", "-c", "gc.auto=0", "-c", "maintenance.auto=false"]  # never repack
@@ -175,15 +153,20 @@ def repo_commits(d, shas) -> list:
     return rows
 
 
-def release_branch_commits(d, skip, since="2024-01-01", default="trunk") -> list:
-    """Commits on the release branches (refs named like 4.3) that the default branch does not have (cherry-picks,
-    version bumps), each with _branch set to the first release branch that holds it. Read from repo.git, no fetch."""
+def release_branch_commits(d, skip, default, pattern, since=None) -> list:
+    """Commits on the release branches (the branch names `pattern` fully matches, e.g. 4.3 or release-1.18) that
+    the default branch does not have (cherry-picks, version bumps), each with _branch set to the first release
+    branch that holds it. `default` is the default branch's name and `since` an optional first day; both, and
+    the pattern, come from the project's settings. Read from repo.git, no fetch."""
+    if not pattern or not default:
+        return []
     names = [n for n in _git(d, "for-each-ref", "--format=%(refname:short)", "refs/heads").split()
-             if re.fullmatch(r"\d+\.\d+", n)]
-    names.sort(key=lambda n: tuple(int(x) for x in n.split(".")))
+             if n != default and re.fullmatch(pattern, n)]
+    names.sort(key=lambda n: (tuple(int(x) for x in re.findall(r"\d+", n)), n))  # oldest release first
     first = {}
     for n in names:
-        for sha in _git(d, "rev-list", f"--since={since}", f"refs/heads/{n}", f"^refs/heads/{default}").split():
+        bounds = [f"--since={since}"] if since else []
+        for sha in _git(d, "rev-list", *bounds, f"refs/heads/{n}", f"^refs/heads/{default}").split():
             if sha not in skip:
                 first.setdefault(sha, n)
     rows = repo_commits(d, list(first))
@@ -215,7 +198,9 @@ def first_tags(d, shas) -> dict:
 
 
 def xhtml_text(body):
-    return "\n".join(f"{h}\n{t}" if h else t for _, h, t in xhtml_sections(body)).strip()
+    """HTML (or Confluence storage XHTML) -> its text, as doctext reads it."""
+    from .doctext import read_confluence
+    return read_confluence(body or "").text
 
 
 EXT_LANG = {"java": "java", "scala": "scala", "py": "python", "kt": "kotlin", "js": "javascript", "ts": "typescript",
@@ -223,13 +208,35 @@ EXT_LANG = {"java": "java", "scala": "scala", "py": "python", "kt": "kotlin", "j
             "xml": "xml", "yml": "yaml", "yaml": "yaml", "properties": "properties"}
 
 
+# a test file, in any language's convention: a test folder, or a name that says so (FooTest.java, foo_test.go,
+# test_foo.py, foo.test.ts, foo.spec.ts, foo_spec.rb, FooTests.cs)
+TEST_DIR = re.compile(r"(^|/)(test|tests|__tests__)/")
+TEST_NAME = re.compile(r"Tests?\.\w+$|_(test|spec)\.\w+$|(^|/)test_[^/]*\.\w+$|\.(test|spec)\.\w+$")
+DOC_EXT = ("md", "html", "txt", "rst", "adoc")
+CONFIG_EXT = ("json", "yml", "yaml", "xml", "properties", "gradle", "toml", "ini", "cfg")
+
+
+@functools.lru_cache(maxsize=4096)
+def _language_of_ext(ext, name):
+    """A file's language: the names this kit has always used (EXT_LANG), else what the tree-sitter grammar pack
+    calls the file type when it is a programming language (one the pack has a symbol query for), else None."""
+    if ext in EXT_LANG:
+        return EXT_LANG[ext]
+    try:
+        import tree_sitter_language_pack as pack
+        lang = pack.detect_language_from_path(name)
+        return lang if lang and pack.get_tags_query(lang) else None
+    except Exception:
+        return None
+
+
 def file_props(path):
     name = path.rsplit("/", 1)[-1]
     ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
-    kind = ("test" if re.search(r"(^|/)(test|tests)/|Test\.\w+$|_test\.py$", path) else
-            "doc" if ext in ("md", "html", "txt") or path.startswith("docs/") else
-            "config" if ext in ("json", "yml", "yaml", "xml", "properties", "gradle", "toml") else "source")
-    return {"path": path, "name": name, "language": EXT_LANG.get(ext), "kind": kind}
+    kind = ("test" if TEST_DIR.search(path) or (ext not in DOC_EXT + CONFIG_EXT and TEST_NAME.search(path)) else
+            "doc" if ext in DOC_EXT or path.startswith("docs/") else
+            "config" if ext in CONFIG_EXT else "source")
+    return {"path": path, "name": name, "language": _language_of_ext(ext, name), "kind": kind}
 
 
 # ---------------------------------------------------------------- the graph
@@ -329,8 +336,7 @@ class Graph:
                 row["errors"][e[:140]] += 1
             for w in res.warnings:
                 row["warnings"][w[:140]] += 1
-            pa = PILLAR_OF_TOOL[a["props"]["source_tool"]]
-            pb = PILLAR_OF_TOOL[b["props"]["source_tool"]]
+            pa, pb = pillar_of(a), pillar_of(b)
             if pa != pb:
                 pillars[" ↔ ".join(sorted((pa, pb)))] += 1
         return rec_report, link_report, pillars
@@ -349,9 +355,11 @@ def J(path):
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
-def set_tenant(tenant: str):
-    global TENANT
+def set_tenant(tenant: str, secret: str | None = None):
+    global TENANT, SECRET
     TENANT = tenant
+    if secret:
+        SECRET = secret
 
 
 def ticket_rx(g: "Graph"):

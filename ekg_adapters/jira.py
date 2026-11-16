@@ -2,7 +2,8 @@
 Activity / FieldChange, ContentVersion, and dated IN_STATE / ASSIGNED_TO history rebuilt from the changelog.
 
 References to other tools are queued for the linker: PR remote links ("GitHub Pull
-Request #n"), PR URLs in comments, KIP numbers in the summary and description.
+Request #n"), PR URLs in comments, decision-proposal keys (the project's decision_prefix, e.g. KIP-123) in the
+summary and description.
 """
 
 import re
@@ -12,7 +13,6 @@ from .access import place
 from .common import Graph, J, day, jira_text, utc
 
 CATEGORY_TYPE = {"new": "unstarted", "indeterminate": "started", "done": "completed"}
-KIP = re.compile(r"\bKIP-(\d+)\b")
 REMOTE_PR = re.compile(r"Pull Request #(\d+)|GitHub PR #?(\d+)", re.I)
 # Jira link type (outward direction) -> schema link and kind
 LINK_TYPES = {"Blocker": ("BLOCKS", "blocks"), "Blocked": ("BLOCKS", "blocks"), "Duplicate": ("DUPLICATE_OF", None),
@@ -26,6 +26,8 @@ def map_jira(g: Graph, d: Path, project_key: str, repo: str):
     scope, _ = place(g, "jira", "tracker_team", project_key)
     team = g.rec("Group", "jira", f"project:{project_key}", {"name": project_key, "kind": "tracker_team", "tool": "jira"}, scope)
     pr_url = re.compile(rf"github\.com/{re.escape(repo)}/pull/(\d+)")
+    prefix = (g.ctx.get("settings") or {}).get("decision_prefix")  # the project's proposal key, e.g. KIP-123
+    proposal_rx = re.compile(rf"\b{re.escape(prefix)}-(\d+)\b") if prefix else None
 
     category = {}
     for itype in J(d / "jira/statuses.json"):
@@ -182,7 +184,7 @@ def map_jira(g: Graph, d: Path, project_key: str, repo: str):
                         if m:
                             g.ref(t, "LINKS_TO", "PullRequest", int(m.group(1) or m.group(2)), "integration",
                                   stub=True, kind="url", at=utc(h["created"]))
-            for n in set(KIP.findall(f"{f['summary']} {f.get('description') or ''}")):
+            for n in set(proposal_rx.findall(f"{f['summary']} {f.get('description') or ''}")) if proposal_rx else ():
                 g.ref(t, "ABOUT", "Decision", int(n), "text_rule", 0.8, reverse=True)
 
             # ---- comments

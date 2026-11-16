@@ -3,8 +3,9 @@
 Reads every .mbox under mail/<folder>/ (any file name) or directly under mail/. The list address is the
 manifest's settings.mail_lists[folder], else the messages' List-Id header, else the folder name.
 
-Classifies each message, with the senders and patterns from the project's settings:
-  - a tracker notification ("[jira] [Created] (KEY-1) ...") ANNOUNCES its ticket
+Classifies each message, with the senders and patterns from the project's settings (notifiers: sender ->
+"tracker" | "code_host" | "ci"; tracker_notice_subject; ci_subject; decision_prefix; vote_threads):
+  - a tracker notification ANNOUNCES the ticket its subject names ("[jira] [Created] (KEY-1) ...")
   - a code-host notification (a "URL: https://github.com/<repo>/pull/N" or ".../issues/N" line) ANNOUNCES
     that PR or issue when it is the project's repo; a notice for another repo, and CI notices, are counted
   - a person's message DISCUSSES the ticket keys in its subject, MENTIONS those only in its body, LINKS_TO
@@ -27,7 +28,6 @@ from pathlib import Path
 from .access import place
 from .common import Graph, from_dt, ticket_rx
 
-JIRA_NOTICE = re.compile(r"^\[jira\] \[(\w+)\] \(([A-Z][A-Z0-9]+-\d+)\)")
 GH_URL = re.compile(r"https://github\.com/([\w.-]+/[\w.-]+)/(pull|issues)/(\d+)")
 GH_REF = re.compile(r"(?<![\w/&#])#(\d{1,6})\b")
 # a vote in a reply: "+1 (binding)", "Thanks! +1 (non-binding).", "-1"
@@ -90,6 +90,7 @@ def map_mail(g: Graph, d: Path):
     repo = (g.ctx.get("repo_name") or "").lower()
     notifiers = {k.lower(): v for k, v in s["notifiers"].items()}
     ci_rx = re.compile(s["ci_subject"], re.I)
+    notice_rx = re.compile(s["tracker_notice_subject"]) if s.get("tracker_notice_subject") else None
     decision_rx = re.compile(rf"\[(DISCUSS|VOTE|RESULT)\].*?\b{re.escape(s['decision_prefix'])}-(\d+)\b", re.I) \
         if s.get("decision_prefix") else None
     github_issues = s.get("issue_tracker") == "github"
@@ -107,7 +108,7 @@ def map_mail(g: Graph, d: Path):
         for m in box:
             try:
                 _one(g, m, folder, s, lists, messages, addresses, threads, decided, in_list, parents, key_rx, repo,
-                     notifiers, ci_rx, decision_rx, github_issues)
+                     notifiers, ci_rx, decision_rx, github_issues, notice_rx)
             except Exception as e:  # one bad message never stops the run
                 g.notes[f"mail: message skipped ({type(e).__name__})"] += 1
     for mid, parent in parents:
@@ -118,7 +119,7 @@ def map_mail(g: Graph, d: Path):
 
 
 def _one(g, m, folder, s, lists, messages, addresses, threads, decided, in_list, parents, key_rx, repo,
-         notifiers, ci_rx, decision_rx, github_issues):
+         notifiers, ci_rx, decision_rx, github_issues, notice_rx):
     addr = s["mail_lists"].get(folder) or _list_address(m) or folder
     if addr not in lists:
         scope, _ = place(g, "mail", "mailing_list", addr)
@@ -155,7 +156,7 @@ def _one(g, m, folder, s, lists, messages, addresses, threads, decided, in_list,
 
     name, sender = email.utils.parseaddr(header(m["From"]))
     sender = sender.lower()
-    if m["From"]:  # the From header as sent ("Chia-Ping Tsai (Jira) via dev <dev@kafka.apache.org>"): one sender identity
+    if m["From"]:  # the From header as sent ("Ada Lovelace (Jira) via dev <dev@lists.example.org>"): one sender identity
         msg["props"]["from_header"] = (f'{name} <{sender}>' if name else sender) if sender else header(m["From"])[:300]
     refs = (m["References"] or "").split()
     parent = (m["In-Reply-To"] or "").strip()
@@ -167,7 +168,7 @@ def _one(g, m, folder, s, lists, messages, addresses, threads, decided, in_list,
                               [list(lst["scope"][0])])
     g.link("IN", msg, threads[root], "field", valid_from=sent)
 
-    if name and not msg["props"].get("sender_name"):  # the display name as sent ("Ismael Juma (Jira)")
+    if name and not msg["props"].get("sender_name"):  # the display name as sent ("Ada Lovelace (Jira)")
         msg["props"]["sender_name"] = re.sub(r"\s+via\s+\S+$", "", name).strip().strip('"') or None
     for cc_name, cc in email.utils.getaddresses([header(m["Cc"])] if m["Cc"] else []):
         cc = cc.lower()
@@ -194,18 +195,19 @@ def _one(g, m, folder, s, lists, messages, addresses, threads, decided, in_list,
                valid_from=sent)
 
     # ---- notifications from integrations
-    if tool == "jira":
-        notice = JIRA_NOTICE.match(subject)
+    if tool == "tracker":  # the ticket key: where the project's notice format puts it, else the first known key
+        notice = notice_rx.search(subject) if notice_rx else key_rx.search(subject)
         if notice:
-            g.ref(msg, "ANNOUNCES", "Ticket", notice.group(2), "integration", stub=True, kind="notify", at=sent)
+            g.ref(msg, "ANNOUNCES", "Ticket", notice.group(1 if notice_rx else 0), "integration", stub=True,
+                  kind="notify", at=sent)
             g.notes["mail: tracker notifications (ANNOUNCES their ticket)"] += 1
         else:
             g.notes["mail: tracker notifications with no ticket key, not linked"] += 1
         return
-    if tool == "ci" or (tool == "github" and ci_rx.search(subject)):
+    if tool == "ci" or (tool == "code_host" and ci_rx.search(subject)):
         g.notes["mail: CI notifications (noise, not linked)"] += 1
         return
-    if tool == "github":
+    if tool == "code_host":
         hits = [h for h in GH_URL.findall(f"{subject}\n{body}") if h[0].lower() == repo]
         if not hits:
             g.notes["mail: code-host notifications for another repo, not linked"] += 1
@@ -242,20 +244,22 @@ def _one(g, m, folder, s, lists, messages, addresses, threads, decided, in_list,
             _votes(g, msg, int(dt_hit.group(2)), quoted, addresses.get(sender) if sender not in lists else None, sent)
 
 
-def _votes(g, msg, kip, text, voter, sent):
-    """A [VOTE] thread: a reply that votes makes its sender a voter on the decision (DECIDED_BY role voter, with
-    the vote and whether it binds); a message that states the tally ("4 binding +1 and 1 non-binding +1") sets
-    it on the decision (the latest such message wins)."""
-    _acceptance(g, msg, kip, text, voter, sent)
+def _votes(g, msg, proposal, text, voter, sent):
+    """A [VOTE] thread about a decision proposal (its number; only reached with the vote_threads setting on and a
+    decision_prefix): a reply that votes makes its sender a voter on the decision (DECIDED_BY role voter, with the
+    vote and whether it binds); a message that states the tally ("4 binding +1 and 1 non-binding +1") sets it
+    on the decision (the latest such message wins)."""
+    _acceptance(g, msg, proposal, text, voter, sent)
     tally = {}
     for n, kind in TALLY.findall(text):
         key = "non_binding_votes" if kind.lower().startswith("non") else "binding_votes"
         tally.setdefault(key, int(n) if n.isdigit() else NUMBER_WORDS[n.lower()])
     if tally:
-        tallies = g.ctx.setdefault("kip_tally", {})
-        if sent and (kip not in tallies or (tallies[kip]["at"] or "") <= sent):
-            tallies[kip] = {**tally, "at": sent}
-        g.notes["mail: KIP vote tallies read from a vote thread"] += 1
+        tallies = g.ctx.setdefault("proposal_tally", {})
+        g.ctx.setdefault("kip_tally", tallies)  # the same table under the name wiki.py still reads
+        if sent and (proposal not in tallies or (tallies[proposal]["at"] or "") <= sent):
+            tallies[proposal] = {**tally, "at": sent}
+        g.notes["mail: proposal vote tallies read from a vote thread"] += 1
         return  # a message that reports the tally does not cast a vote
     head = []  # the reply's own words, before the quoted message ("On ... wrote:")
     for line in text.strip().splitlines()[:12]:
@@ -271,9 +275,9 @@ def _votes(g, msg, kip, text, voter, sent):
             return
     note = m.group(2).lower()
     binding = False if re.search(r"non[- ]?bin?d", note) else True if re.search(r"\bbi\w{0,3}ing\b", note) else None
-    g.ref(voter, "DECIDED_BY", "Decision", kip, "text_rule", 0.9, reverse=True, evidence=[msg], role="voter",
+    g.ref(voter, "DECIDED_BY", "Decision", proposal, "text_rule", 0.9, reverse=True, evidence=[msg], role="voter",
           vote=m.group(1), binding=binding, at=sent)
-    g.notes["mail: KIP votes cast in a vote thread (DECIDED_BY role voter)"] += 1
+    g.notes["mail: proposal votes cast in a vote thread (DECIDED_BY role voter)"] += 1
 
 
 def _voter_by_name(g, name, msg):
@@ -302,7 +306,7 @@ WITHDRAWN = re.compile(r"\bkeep (?:it|the vote|the thread) open\b|\bchange the s
                        r"\b(?:re-?open)\b|\bnot (?:yet )?(?:be )?accepted\b|\bpremature", re.I)
 
 
-def _acceptance(g, msg, kip, text, voter, sent):
+def _acceptance(g, msg, proposal, text, voter, sent):
     """In a vote thread, the one who announced the proposal accepted and later withdrew it (a vote closed too early,
     say): the withdrawal is a Decision of its own that REVERSES the proposal's acceptance, from that message until
     an acceptance announced again."""
@@ -310,25 +314,28 @@ def _acceptance(g, msg, kip, text, voter, sent):
     if who is None or not sent:
         return
     head = "\n".join(text.strip().splitlines()[:15])
-    state = g.ctx.setdefault("kip_acceptance", {}).setdefault(kip, {})
+    state = g.ctx.setdefault("proposal_acceptance", {}).setdefault(proposal, {})
     if ACCEPTED.search(head):
         if state.get("withdrawn") is not None:  # accepted again: the reversal ends here
             state["withdrawn"]["valid_to"] = sent
             state["withdrawn"] = None
         state["by"], state["at"] = who["id"], sent
         return
-    own = (g.ctx.get("settings") or {}).get("withdrawal_phrases")
+    settings = g.ctx.get("settings") or {}
+    own = settings.get("withdrawal_phrases")
+    label = f"{settings.get('decision_prefix')}-{proposal}"  # the proposal as the project writes it, e.g. KIP-123
     withdrawn = re.compile(own, re.I) if own else WITHDRAWN
     if state.get("by") == who["id"] and state.get("at") and state["at"] < sent and withdrawn.search(head):
         line = next((ln.strip() for ln in head.splitlines() if withdrawn.search(ln)), head[:200])
-        dec = g.rec("Decision", "derived", f"kip:{kip}:withdrawn:{msg['props']['message_id']}", {
-            "title": f"Acceptance of KIP-{kip} withdrawn",
-            "statement": f"{msg['props'].get('sender_name') or 'The announcer'} withdrew the acceptance of KIP-{kip} "
+        # the id keeps the "kip:" namespace wiki.py gives every proposal's Decision, whatever the prefix
+        dec = g.rec("Decision", "derived", f"kip:{proposal}:withdrawn:{msg['props']['message_id']}", {
+            "title": f"Acceptance of {label} withdrawn",
+            "statement": f"{msg['props'].get('sender_name') or 'The announcer'} withdrew the acceptance of {label} "
                          f"announced {state['at']}: \"{line}\"",
             "rationale": head[:1500], "status": "accepted", "decided_at": sent}, msg["scope"])
         g.link("MADE_IN", dec, msg, "text_rule", 0.85, evidence=[msg], at=sent)
         g.link("DECIDED_BY", dec, who, "text_rule", 0.85, evidence=[msg], role="decider", at=sent)
-        g.ref(dec, "REVERSES", "Decision", kip, "text_rule", 0.85, evidence=[msg], valid_from=sent, kind="withdrawal",
+        g.ref(dec, "REVERSES", "Decision", proposal, "text_rule", 0.85, evidence=[msg], valid_from=sent, kind="withdrawal",
               reason=line[:300])
         state["withdrawn"] = g.refs[-1][7]  # the queued link's own fields: valid_to is set if it is accepted again
         g.notes["mail: proposal acceptances withdrawn in the vote thread (Decision REVERSES)"] += 1

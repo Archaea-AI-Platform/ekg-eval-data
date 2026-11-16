@@ -1,0 +1,19 @@
+{
+ "note": "Synthetic. The generic people directory (settings.DIRECTORY_ROW): what an HR or identity-provider connector writes.",
+ "link_method": "idp",
+ "people": [
+  {"id": "e-100", "name": "Alice Ng", "email": "alice@acme.io", "title": "Engineering Manager",
+   "employment_type": "employee", "location": "London", "start_date": "2024-03-01",
+   "teams": ["Payments"], "accounts": {"github": "alice-gh", "slack": "U01ALICE"}},
+  {"id": "e-101", "name": "Bob Ruiz", "emails": ["bob@acme.io", "bob.ruiz@acme.io"], "title": "Backend Engineer",
+   "manager": "e-100", "start_date": "2025-02-01",
+   "teams": [{"name": "Payments", "since": "2025-02-01"}]},
+  {"id": "e-102", "name": "Dave Okafor", "email": "dave@acme.io", "title": "Security Engineer", "manager": "e-100",
+   "teams": [{"id": "grp-sec", "name": "Security", "kind": "department", "role": "lead"}],
+   "position": {"id": "pos-sec-1", "name": "Security Engineer II", "since": "2025-06-01"}},
+  {"id": "e-090", "name": "Frank Old", "email": "Frank@acme.io", "status": "inactive", "manager": "e-999",
+   "start_date": "2023-01-09", "end_date": "2026-06-30",
+   "teams": [{"name": "Payments", "since": "2023-01-09", "until": "2026-06-30"}]},
+  {"name": "A row with no id"}
+ ]
+}
