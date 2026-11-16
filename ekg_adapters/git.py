@@ -24,7 +24,8 @@ import re
 from pathlib import Path
 
 from .access import place
-from .common import Graph, commit_changes, file_props, first_tags, release_branch_commits, repo_commits, ticket_rx, utc
+from .common import (Graph, add_missing, commit_changes, file_props, first_tags, release_branch_commits, repo_commits,
+                     supplement_rows, ticket_rx, utc)
 
 NOREPLY = re.compile(r"^(\d+)\+([^@]+)@users\.noreply\.github\.com$")
 PRNUM = re.compile(r"\(#(\d+)\)\s*$")
@@ -66,7 +67,7 @@ def normalize_commit(c):
             "authored_at": c.get("authored_at") or c.get("author_date") or a_date or c.get("date"),
             "committer_name": c.get("committer_name") or k_name, "committer_email": c.get("committer_email") or k_mail,
             "committed_at": c.get("committed_at") or c.get("committer_date") or k_date or c.get("date"),
-            "message": message or "", "files": files}
+            "message": message or "", "files": files, "patch_id": c.get("patch_id")}
 
 
 def ensure_repo(g: Graph, repo_name: str):
@@ -137,6 +138,15 @@ def map_git(g: Graph, d: Path):
         c["_off_default"] = True
     rows += released
     g.notes["git: release-branch commits not on the default branch"] = len(released)
+    # the download's supplement (extra/supplement/git/commits.jsonl): more of the same commit rows, matched by sha,
+    # adding only the fields a row lacks (e.g. git's patch id, which needs file contents a blobless clone lacks)
+    by_sha = {c["sha"]: c for c in rows}
+    for more in supplement_rows(d, "git/commits.jsonl"):
+        c = by_sha.get(more.get("sha"))
+        if c is None:
+            g.notes["git: supplement row for a commit not loaded, skipped"] += 1
+        elif add_missing(c, {k: v for k, v in more.items() if k != "sha"}):
+            g.notes["git: commits completed from the download's supplement"] += 1
     tag_of = first_tags(d, [c["sha"] for c in rows])  # the earliest tag holding each commit
     g.notes["git: commits with the first tag that contains them"] = len(tag_of)
     # every commit's file changes as blob ids, from repo.git's trees (no contents, no fetch): the file list of a commit
@@ -228,22 +238,46 @@ def _equivalent(g, commits, rows, changes):
     """Commits that carry the identical change under different shas (a cherry-pick or rebase onto an unchanged file):
     the same files going from the same blob to the same blob, with the same modes. Identical blob changes are an
     identical patch, so git's patch id would be equal too; the patch id itself needs the file contents, which a
-    blobless clone does not hold, so it is not stored. Each later commit is EQUIVALENT_TO the earliest one."""
+    blobless clone does not hold. When a commit row states its patch id (git's own, e.g. from the download's
+    supplement), commits with the same patch id are the same change too, and a link whose two commits share one
+    carries it (patch_id) instead of kind identical_change. Each later commit is EQUIVALENT_TO the earliest one."""
+    up = {}
+
+    def find(x):
+        while up.get(x, x) != x:
+            up[x] = up.get(up[x], up[x])
+            x = up[x]
+        return x
+
+    pid = {c["sha"]: c.get("patch_id") for c in rows}
+    for c in rows:  # one change: the same blob changes, or the same stated patch id
+        for k in (("blobs", tuple(sorted(changes[c["sha"]]))) if changes.get(c["sha"]) else None,
+                  ("patch_id", pid[c["sha"]]) if pid[c["sha"]] else None):
+            if k is not None:
+                ra, rb = find(c["sha"]), find(k)
+                if ra != rb:
+                    up[ra] = rb
     groups = {}
     for c in rows:
-        ch = changes.get(c["sha"])
-        if ch:
-            groups.setdefault(tuple(sorted(ch)), []).append(commits[c["sha"]])
-    linked = 0
+        if changes.get(c["sha"]) or pid[c["sha"]]:
+            groups.setdefault(find(c["sha"]), []).append(commits[c["sha"]])
+    linked = with_pid = 0
     for members in groups.values():
         if len(members) < 2:
             continue
         members.sort(key=lambda r: (r["props"].get("committed_at") or "", r["props"]["sha"]))
         for other in members[1:]:
-            g.link("EQUIVALENT_TO", other, members[0], "inferred", 1.0, evidence=[other, members[0]], derived=True,
-                   rule_id="derive:equivalent_by_identical_blob_changes", kind="identical_change")
+            p = pid[other["props"]["sha"]]
+            if p and p == pid[members[0]["props"]["sha"]]:  # git's patch id, the same for both
+                g.link("EQUIVALENT_TO", other, members[0], "inferred", 1.0, evidence=[other, members[0]], derived=True,
+                       rule_id="derive:equivalent_by_patch_id", patch_id=p)
+                with_pid += 1
+            else:
+                g.link("EQUIVALENT_TO", other, members[0], "inferred", 1.0, evidence=[other, members[0]], derived=True,
+                       rule_id="derive:equivalent_by_identical_blob_changes", kind="identical_change")
             linked += 1
     g.notes["git: commits EQUIVALENT_TO an earlier commit with the identical change"] = linked
-    if linked:  # the declared patch_id stays empty on purpose: the basis is kind identical_change (+ rule_id)
+    g.notes["git: EQUIVALENT_TO links carrying git's patch id (both commits' patch id stated)"] = with_pid
+    if linked - with_pid:  # the declared patch_id stays empty on purpose: the basis is kind identical_change (+ rule_id)
         g.notes["git: EQUIVALENT_TO links with no patch_id (git's patch id needs both versions' file contents, which "
-                "the clone lacks; equivalence is identical per-file blob changes, kind identical_change)"] = linked
+                "the clone lacks; equivalence is identical per-file blob changes, kind identical_change)"] = linked - with_pid

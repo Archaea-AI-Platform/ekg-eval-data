@@ -182,7 +182,18 @@ def make_repo(tmp: Path, data: Path):
                      "files": [{"status": "A" if not parents else "M", "path": "f.txt"}]
                      + ([] if parents else [{"status": "D", "path": "old/gone.py"}])})
     (data / "git" / "commits.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
-    return {"A": a, "B": b, "C": c}
+    # the download's supplement: git's patch id for B and C (more of the same commit rows, matched by sha); its
+    # message for B must not replace the one the download states
+    pid = {}
+    for k, sha in (("B", b), ("C", c)):
+        show = subprocess.run(["git", "show", sha], cwd=work, check=True, capture_output=True).stdout
+        pid[k] = subprocess.run(["git", "patch-id", "--stable"], cwd=work, input=show, check=True,
+                                capture_output=True).stdout.decode().split()[0]
+    sup = data / "extra" / "supplement" / "git"
+    sup.mkdir(parents=True, exist_ok=True)
+    (sup / "commits.jsonl").write_text(json.dumps({"sha": b, "patch_id": pid["B"], "message": "not this"}) + "\n"
+                                       + json.dumps({"sha": c, "patch_id": pid["C"]}) + "\n", encoding="utf-8")
+    return {"A": a, "B": b, "C": c, "pid": pid["B"]}
 
 
 def build_main(tmp: Path):
@@ -407,6 +418,10 @@ def main() -> int:
     check("git: the cherry-pick with identical blob changes is EQUIVALENT_TO the earlier commit (derived, timeless)",
           len(eq) == 1 and eq[0]["props"].get("derived") and not eq[0]["props"].get("valid_from")
           and not g.linked("EQUIVALENT_TO", ca, cb))
+    check("git: the download's supplement adds git's patch id; the equivalence link carries it (no kind identical_change)",
+          len(eq) == 1 and eq[0]["props"].get("patch_id") == shas["pid"] and not eq[0]["props"].get("kind"))
+    check("git: a supplement row never replaces what the download states (B's message)",
+          cb["props"]["message"] == "two")
 
     # ---- code: labeler, code owners, change folders
     folder = lambda p: g.one("Folder", path=p)

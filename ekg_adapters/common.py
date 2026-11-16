@@ -110,6 +110,37 @@ def xhtml_sections(body):
     return out
 
 
+SUPPLEMENT = Path("extra") / "supplement"  # data added after a download, beside it, in the download's own shapes
+
+
+def supplement_rows(d, rel) -> list:
+    """The rows of <download>/extra/supplement/<rel> (a .jsonl file in the same shape as the download file <rel>
+    it adds to; see that folder's README for where each came from), or [] when there is none. A row that can't be
+    read is skipped."""
+    p = Path(d) / SUPPLEMENT / rel
+    if not p.is_file():
+        return []
+    rows = []
+    for line in p.read_text(encoding="utf-8").splitlines():
+        try:
+            row = json.loads(line) if line.strip() else None
+        except json.JSONDecodeError:
+            row = None
+        if isinstance(row, dict):
+            rows.append(row)
+    return rows
+
+
+def add_missing(row: dict, more: dict) -> int:
+    """Fill the fields `row` lacks (absent, None or empty) from `more`; never replace a stated value. -> fields added."""
+    n = 0
+    for k, v in more.items():
+        if v not in (None, "", [], {}) and row.get(k) in (None, "", [], {}):
+            row[k] = v
+            n += 1
+    return n
+
+
 GIT_READ = ["-c", "core.quotePath=false", "-c", "gc.auto=0", "-c", "maintenance.auto=false"]  # never repack
 
 
