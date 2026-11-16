@@ -201,7 +201,8 @@ async def run(args):
                     key = (asker, at)
                     if key not in views:
                         views[key] = View(g, asker=asker, at=at)
-                    res = await asyncio.wait_for(ask(q["question"], Tools(views[key]), client=client, max_steps=args.max_steps),
+                    res = await asyncio.wait_for(ask(q["question"], Tools(views[key]), client=client,
+                                                     **({"max_steps": args.max_steps} if args.max_steps else {})),
                                                  args.question_timeout)
             except asyncio.TimeoutError:  # a stalled provider is a failed question, not a stalled run
                 res = {"answer": "", "tool_calls": [], "usage": {}, "stopped": f"timeout after {args.question_timeout}s"}
@@ -213,7 +214,10 @@ async def run(args):
                "question": q["question"], "as_of": at, "asker": asker, "gold_answer": q["gold_answer"],
                "expected_behavior": q["behavior"], **verdict, "answer": res["answer"], "stopped": res.get("stopped"),
                "tool_calls": res.get("tool_calls"), "usage": res.get("usage"), "seconds": secs, "model": res.get("model"),
-               "paged": res.get("paged"), "compactions": res.get("compactions")}
+               "paged": res.get("paged"), "compactions": res.get("compactions"),
+               "calls": len(res.get("tool_calls") or []),
+               "tokens": sum(int((res.get("usage") or {}).get(k) or 0) for k in ("prompt_tokens", "completion_tokens")),
+               **{k: res[k] for k in ("question_plan", "budget", "notes") if res.get(k) is not None}}
         log.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")  # kept at once: a stopped run loses nothing
         log.flush()
         mark = {True: "PASS", False: "FAIL", None: "----"}[verdict["pass"]]
@@ -267,7 +271,9 @@ def main() -> int:
     ap.add_argument("--categories", default=None)
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--concurrency", type=int, default=8, help="questions asked at the same time")
-    ap.add_argument("--max-steps", type=int, default=12)
+    ap.add_argument("--max-steps", type=int, default=None,
+                    help="the agent's turns at most (default: none passed; the agent decides how much to look and keeps "
+                         "only its own runaway brakes)")
     ap.add_argument("--only-failed", default=None, help="an earlier results.jsonl: ask only what did not pass there")
     ap.add_argument("--question-timeout", type=int, default=900, help="seconds one question may take")
     ap.add_argument("--api", default=None, help="a running query-master, e.g. http://127.0.0.1:7111: ask through its endpoint")
