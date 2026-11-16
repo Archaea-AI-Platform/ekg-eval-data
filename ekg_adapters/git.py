@@ -244,3 +244,6 @@ def _equivalent(g, commits, rows, changes):
                    rule_id="derive:equivalent_by_identical_blob_changes", kind="identical_change")
             linked += 1
     g.notes["git: commits EQUIVALENT_TO an earlier commit with the identical change"] = linked
+    if linked:  # the declared patch_id stays empty on purpose: the basis is kind identical_change (+ rule_id)
+        g.notes["git: EQUIVALENT_TO links with no patch_id (git's patch id needs both versions' file contents, which "
+                "the clone lacks; equivalence is identical per-file blob changes, kind identical_change)"] = linked

@@ -269,11 +269,17 @@ def _links(g, owner, piece, pc, scope, tool, at, factor, key_rx, github_issues, 
     for r in pc["refs"]:
         if r.kind == "url":
             g.ref(piece, "LINKS_TO", "Url", r.target, "field", 0.95, kind="url", at=at)
+            # a page that links another page: the documents are linked too (the piece is the evidence)
+            g.ref(owner, "LINKS_TO", "Url", r.target, "field", 0.95, kind="url", at=at, evidence=[piece], only="Document")
         elif r.kind == "page":
             if r.extra.get("id"):
-                g.ref(piece, "LINKS_TO", "DocumentById", (tool, r.extra["id"]), "field", at=at)
+                key, ttype = (tool, r.extra["id"]), "DocumentById"
             elif r.target:
-                g.ref(piece, "LINKS_TO", "DocumentByTitle", (tool, r.extra.get("space") or space, r.target), "field", at=at)
+                key, ttype = (tool, r.extra.get("space") or space, r.target), "DocumentByTitle"
+            else:
+                continue
+            g.ref(piece, "LINKS_TO", ttype, key, "field", at=at)
+            g.ref(owner, "LINKS_TO", ttype, key, "field", at=at, evidence=[piece], only="Document")
         elif r.kind == "file":
             path = r.target.split("#")[0].split("?")[0]
             if path:

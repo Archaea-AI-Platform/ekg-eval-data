@@ -39,6 +39,8 @@ def main() -> int:
     ap.add_argument("--limit", type=int, default=None, help="ask at most this many new tasks per kind (test runs)")
     ap.add_argument("--docs", type=int, default=None, metavar="N",
                     help="read only N documents, evenly spaced over all of them (test runs; the report says so)")
+    ap.add_argument("--only", default=None, metavar="ID,ID",
+                    help="read only these documents: record ids, keys, native ids, paths or titles, comma separated")
     ap.add_argument("--concurrency", type=int, default=16, help="model calls in flight at once (default 16)")
     ap.add_argument("--window-tokens", type=int, default=None,
                     help="the model's context window, when the backend cannot say (default: asked from query-master)")
@@ -56,7 +58,8 @@ def main() -> int:
         ap.error(f"unknown kinds: {bad}")
     report = run(Path(args.graph), Path(args.query_master), Path(args.out) if args.out else None, kinds, args.limit,
                  "dry" if args.dry_run else "smoke" if args.smoke else "run", args.smoke or 0, args.concurrency, args.model,
-                 window_tokens=args.window_tokens, docs=args.docs, max_reply_tokens=args.max_reply_tokens)
+                 window_tokens=args.window_tokens, docs=args.docs, max_reply_tokens=args.max_reply_tokens,
+                 only=[x for x in (args.only or "").split(",") if x.strip()] or None)
     if report["mode"] == "dry":
         print(f"\n{'kind':<16} {'tasks':>8} {'calls':>8} {'prompt chars':>14} {'tokens (upper)':>15} {'tokens (typical)':>17}")
         for k, r in report["kinds"].items():

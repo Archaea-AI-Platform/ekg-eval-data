@@ -133,8 +133,19 @@ def description_checks(check):
     # the prompts themselves
     t = extract_tables.build(big)[0][0]
     prompt = extract_tables.prompt(t, cat)
-    check("descriptions: the table prompt holds them and its reply contract never lists rows",
-          reg.link("CHANGES").about in prompt and "never lists rows" in prompt and "from_column" in prompt and "schema_gap" in prompt)
+    shape = {"shape": "rows", "row_type": "PullRequest", "name_column": "none", "key_column": "c2.1", "statement_column": "none",
+             "cell_parts": [{"column": "c2", "parts": 2, "separator": " / ", "pattern": ""}],
+             "columns": [{"column": "c3", "type": "Account"}, {"column": "c4", "type": "Account"}, {"column": "c2.2", "type": "Service"}]}
+    cprompt, cands = extract_tables.columns_prompt(t, cat, shape)
+    first = lambda text: extract_schema.first_sentence(text).rstrip(";.")
+    check("descriptions: step 1 lists every record type with its description's first sentence, and never lists rows",
+          first(reg.record("PullRequest").about) in prompt and "never lists rows" in prompt and "- Commit:" in prompt
+          and "LINK TYPES" not in prompt and "columns" in prompt)
+    check("descriptions: step 2 lists only the links between the table's types (AUTHORED_BY, APPROVED_BY, ABOUT a "
+          "Service), each with its whole description, and the row type's fields with theirs",
+          {"AUTHORED_BY", "APPROVED_BY", "ABOUT"} <= set(cands) and "CHANGES" not in cands and "REPORTS_TO" not in cands
+          and reg.link("APPROVED_BY").about in cprompt and reg.record("PullRequest").fields["merged_at"].about in cprompt
+          and "from_column" in cprompt and "schema_gap" in cprompt and len(cprompt) < len(extract_tables.catalog_text(cat)[0]))
     dp = extract_facts.prompt(type("T", (), {"context": "DOCUMENT: x", "question": "q", "sources": []})(), cat, [])
     check("descriptions: the document prompt tells Requirement from Guideline by their descriptions and a requirement's own id",
           "is a Requirement; a Guideline is a rule for how the team itself works" in dp and "numbers with an id of its own" in dp

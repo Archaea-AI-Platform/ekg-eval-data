@@ -141,6 +141,7 @@ def run(data: Path, query_master: Path, out: Path | None = None, raw_check: bool
     g = Graph(observed_at=manifest["fetched_at"])
     g.ctx["repo_name"] = manifest.get("repo", "")
     g.ctx["slack_workspace_name"] = manifest.get("slack_workspace")
+    g.ctx["source_urls"] = manifest.get("sources") or {}  # each tool's address (the wiki host for its page links)
     g.ctx["settings"] = settings = project_settings(manifest, data)
     timings, t0 = {}, time.time()
     for n in manifest_notes:

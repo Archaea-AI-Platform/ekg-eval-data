@@ -103,15 +103,20 @@ def map_github(g: Graph, d: Path, repo_name: str):
         return branches[ref]
 
     def label(name):
-        if name not in label_recs:
-            label_recs[name] = g.rec("Label", "github", f"{repo_json['id']}:{name}", {"name": name, "kind": "code"}, scope)
-        return label_recs[name]
+        # the code host compares label names without regard to case (one repository cannot hold "KIP-932" and
+        # "kip-932"): one Label per name in any case, named as first seen (the repository's own list comes first)
+        if name.casefold() not in label_recs:
+            label_recs[name.casefold()] = g.rec("Label", "github", f"{repo_json['id']}:{name}", {"name": name, "kind": "code"},
+                                                scope)
+            g.link("IN", label_recs[name.casefold()], repo, "field")
+        return label_recs[name.casefold()]
 
     # every label the repository defines, not only those a downloaded PR carries
     for lb in J(d / "github/labels.json") if (d / "github/labels.json").exists() else []:
         if lb.get("name"):
             label(lb["name"])
-    g.ctx["code_labels"] = label  # the code tree's labeler config names labels by name (code.py)
+    # the code tree's labeler config names labels by name (code.py): it may only find them, never make one
+    g.ctx["code_label"] = lambda name: label_recs.get(str(name).casefold())
     milestones = {}
     for ms in J(d / "github/milestones.json") if (d / "github/milestones.json").exists() else []:
         milestones[ms["number"]] = g.rec("Milestone", "github", ms["id"], {"name": ms.get("title"),

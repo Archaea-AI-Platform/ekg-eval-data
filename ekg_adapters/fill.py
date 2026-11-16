@@ -55,6 +55,16 @@ CONFIDENCE = {
 }
 BUDGET = fill_budget.sizes()   # what one prompt may carry; run() replaces it with the served model's
 CLIPPED = collections.Counter()  # judge prompts larger than a whole window, by kind (their longest texts shortened)
+# tokens per second of each call this process made that reported its tokens (Responses._send): what a time guard
+# reads the provider's speed from, since one under load (several runs at once) writes slower than when idle
+PACE = collections.deque(maxlen=200)
+
+
+def slow_pace(floor):
+    """The pace a time guard allows for: the slowest quarter of the calls seen so far (at least 4 of them), never
+    faster than `floor` (fill_budget.SLOW_TOKENS_PER_SECOND). Slower when the provider is slower."""
+    seen = sorted(PACE)
+    return min(floor, seen[len(seen) // 4]) if len(seen) >= 4 else floor
 
 
 def confidence(how: str, quality: float = 1.0) -> float:
@@ -221,12 +231,24 @@ _BROKEN_WORD = re.compile(r"(\w)-[ \t]*\n\s*(\w)")  # a word hyphenated at a lin
 _SOFT_HYPHEN = "\u00ad"
 
 
+# a hyperlink's target as the document adapters write it after the link's words ("KIP-595 <https://...>"): the
+# words are the text, the target is markup a quote leaves out. Taken out of both sides of a comparison.
+_LINK_TARGET = re.compile(r"[ \t]*<(?:https?|ftp|mailto):[^<>\s]*>")
+# every quotation mark as one: a model writing a quote inside a JSON string turns the text's "bridge release" into
+# 'bridge release' (Kafka sample 2); typographic and straight marks alike. No word changes.
+_QUOTE_MARKS = str.maketrans({c: "'" for c in "\"“”„‟«»‘’‚‛"})
+_LABEL = re.compile(r"^\s*\[[A-Z]\d+\]\s*")   # the passage label the prompt itself puts before a passage ("[P3] ")
+# where a model joins sentences it quotes: an ellipsis, a line break, or one sentence ending and the next beginning
+_JOINS = re.compile(r"\s*(?:\.\.\.|…)\s*|\s*\n\s*|(?<=[.!?;:])\s+")
+
+
 def _norm(s, joined=""):
     """Text as a quote is compared: Unicode NFKC (ligatures, wide forms), soft hyphens out, a word broken at a
-    line end joined (with `joined` between its halves), whitespace collapsed, case folded. Both sides of a
-    comparison go through the same function, so the words must still be the same words."""
+    line end joined (with `joined` between its halves), hyperlink targets out, whitespace collapsed, case folded.
+    Both sides of a comparison go through the same function, so the words must still be the same words."""
     s = unicodedata.normalize("NFKC", s or "").replace(_SOFT_HYPHEN, "")
     s = _BROKEN_WORD.sub(lambda m: f"{m.group(1)}{joined}{m.group(2)}", s)
+    s = _LINK_TARGET.sub("", s).translate(_QUOTE_MARKS)
     return re.sub(r"\s+", " ", s).strip().casefold()
 
 
@@ -235,14 +257,35 @@ def _forms(s):
     return {_norm(s, ""), _norm(s, "-")}
 
 
+def _variants(s):
+    return {c for c in (q.strip(" \"'“”‘’…").rstrip(".") for q in _forms(s)) if len(c) >= 3}
+
+
+def quote_parts(quote):
+    """(the whole quote's forms, [each sentence's forms]) as a quote is checked. The sentences are the parts the
+    model joined (by an ellipsis, a line break or a sentence end); [] when it is one sentence. A passage label the
+    prompt put before the passage ("[P3] ") is not part of the quote."""
+    q = _LABEL.sub("", quote or "")
+    parts = [v for v in (_variants(p) for p in _JOINS.split(q) if p.strip()) if v]
+    return _variants(q), (parts if len(parts) > 1 else [])
+
+
 def find_quote(quote, items):
-    """The item whose shown text holds the quote word for word (spacing, case, ligatures and line-end hyphens
-    aside), else None."""
-    qs = {q.strip(" \"'“”‘’…").rstrip(".") for q in _forms(quote)}
-    qs = {q for q in qs if len(q) >= 3}
-    if not qs:
+    """The item whose shown text holds the quote word for word (spacing, case, ligatures, line-end hyphens and
+    hyperlink targets aside), else None. A quote that joins several sentences (with "...", a line break, or one
+    after another) passes when EACH of its sentences is word for word in that one item: every word is still the
+    text's, only the gaps between the sentences are left out."""
+    whole, parts = quote_parts(quote)
+    if not whole:
         return None
-    return next((it for it in items if any(q in f for f in _forms(f"{it.title} {it.text}") for q in qs)), None)
+    shown = [(it, _forms(f"{it.title} {it.text}")) for it in items]
+    for it, hay in shown:
+        if any(q in f for f in hay for q in whole):
+            return it
+    for it, hay in shown:
+        if parts and all(any(q in f for f in hay for q in p) for p in parts):
+            return it
+    return None
 
 
 def locate(quote, src, items):
@@ -360,7 +403,22 @@ class Responses:
             total.update(c)
         return {"by_step": steps, "total": dict(total)}
 
-    async def ask(self, task_id, prompt, name, schema, **_ignored):
+    async def _send(self, prompt, name, schema, timeout):
+        """One call to the model; `timeout` (a function, read when the call is sent, after the gate) bounds its time.
+        The pace of every call that reported its tokens is kept (PACE), so a guard can follow the provider's speed."""
+        sent = time.monotonic()
+        limit = timeout() if timeout else None
+        try:
+            res = await (asyncio.wait_for(llm.ask(prompt, name, schema), timeout=limit) if limit else llm.ask(prompt, name, schema))
+        except asyncio.TimeoutError:
+            return {"error": f"reply ran away: no answer after {int(limit):,} seconds"}
+        used = ((res.get("_usage") or {}).get("completion_tokens") if isinstance(res, dict) else None)
+        took = time.monotonic() - sent
+        if isinstance(used, (int, float)) and used > 0 and took > 0.5:
+            PACE.append(used / took)
+        return res
+
+    async def ask(self, task_id, prompt, name, schema, timeout=None, **_ignored):
         k = self.key(prompt, name)
         if k in self.seen:
             self.hits += 1
@@ -375,9 +433,9 @@ class Responses:
                 self._gate = (loop, asyncio.Semaphore(self.concurrency))
             if self._gate is not None:
                 async with self._gate[1]:
-                    res = await llm.ask(prompt, name, schema)
+                    res = await self._send(prompt, name, schema, timeout)
             else:
-                res = await llm.ask(prompt, name, schema)
+                res = await self._send(prompt, name, schema, timeout)
         except Exception as e:  # the client returns errors as values; anything it raises is one too
             res = {"error": f"{type(e).__name__}: {e}"}
         except asyncio.CancelledError:  # given up by its caller (a mapping past its time): whoever waits on it too
@@ -414,19 +472,67 @@ class Responses:
         self.file.close()
 
 
+CUT_SPLIT_DEPTH = 5   # a reply cut at the provider's limit: halved again up to this many times (1/32 of the text)
+MIN_SPLIT_CHARS = 800   # a passage shorter than this is not cut in two
+
+
+def reply_cut(ans):
+    """Did this reply stop at a size limit (the provider's reply limit, the window, a reply gone round in circles)?
+    Asking about less text is the remedy for that; for any other failure it is not."""
+    if not isinstance(ans, dict) or "error" not in ans:
+        return False
+    return bool(ans.get("window_full")) or bool(re.search(r"window full|cut off|reply limit|ran away", str(ans["error"]), re.I))
+
+
+def halve_text(it):
+    """One passage as two, cut at the paragraph (else line, else sentence) end nearest its middle, with the same
+    label and record, so a quote from either half cites the passage. None when it is short or has no such end."""
+    text = it.text or ""
+    if len(text) < MIN_SPLIT_CHARS:
+        return None
+    mid = len(text) // 2
+    for sep in ("\n\n", "\n", ". "):
+        cuts = [m.end() for m in re.finditer(re.escape(sep), text) if 0 < m.end() < len(text)]
+        if cuts:
+            at = min(cuts, key=lambda i: abs(i - mid))
+            a, b = text[:at].rstrip(), text[at:].lstrip()
+            if a and b:
+                return [type(it)(it.label, it.id, f"{it.title} (part {k} of 2 of this passage)", part, it.type)
+                        for k, part in ((1, a), (2, b))]
+    return None
+
+
 async def ask_split(ask, sources, make_prompt, name, make_schema, depth=0):
-    """Ask about these passages; when the answer fails (a reply cut off, JSON that does not parse) and there is
-    more than one passage, ask about each half instead. Returns [(passages, answer)], or the error."""
+    """Ask about these passages; when the answer fails, ask about each half instead: the passages in two or, when the
+    reply was cut at a size limit (reply_cut) and this is one passage, that passage's text in two (halve_text).
+    Halving goes on SPLIT_DEPTH times for a failed answer, CUT_SPLIT_DEPTH times for a cut one.
+    Returns (answered [(passages, answer)], failed [(passages, error)]): halves that were answered are kept when
+    another half failed."""
     ans = await ask(make_prompt(sources), name, make_schema([s.label for s in sources]))
     if not _error(ans):
-        return [(sources, ans)]
-    if len(sources) < 2 or depth >= SPLIT_DEPTH:
-        return ans if isinstance(ans, dict) else {"error": "no JSON object"}
-    mid = len(sources) // 2
-    halves = await asyncio.gather(ask_split(ask, sources[:mid], make_prompt, name, make_schema, depth + 1),
-                                  ask_split(ask, sources[mid:], make_prompt, name, make_schema, depth + 1))
-    bad = next((h for h in halves if isinstance(h, dict)), None)
-    return bad if bad else halves[0] + halves[1]
+        return [(sources, ans)], []
+    err = ans if isinstance(ans, dict) else {"error": "no JSON object"}
+    cut = reply_cut(err)
+    halves = None
+    if depth < (CUT_SPLIT_DEPTH if cut else SPLIT_DEPTH):
+        if len(sources) >= 2:
+            mid = len(sources) // 2
+            halves = [sources[:mid], sources[mid:]]
+        elif cut and (parts := halve_text(sources[0])):
+            halves = [[parts[0]], [parts[1]]]
+    if not halves:
+        return [], [(sources, err)]
+    got = await asyncio.gather(*[ask_split(ask, h, make_prompt, name, make_schema, depth + 1) for h in halves])
+    return [x for a, _ in got for x in a], [x for _, f in got for x in f]
+
+
+def unanswered(failed):
+    """For a ledger entry: the labels of the passages no answer covers and the first error ({} when none). An entry
+    with unanswered passages is asked again next run (the answered halves come from responses.jsonl)."""
+    if not failed:
+        return {}
+    labels = sorted({s.label for ss, _ in failed for s in ss}, key=lambda s: (len(s), s))
+    return {"unanswered": labels, "unanswered_error": _error(failed[0][1])}
 
 
 async def settle(t: Task, responses: Responses, v=None):
@@ -442,9 +548,10 @@ async def settle(t: Task, responses: Responses, v=None):
         return await extract_tables.settle(t, ask, v.catalog())
     if t.kind not in EXTRACTS:
         return check(t, await ask(judge_prompt(t), f"ekg_{t.kind}", judge_schema(t.labels())))
-    got = await ask_split(ask, t.sources, lambda ss: extract_prompt(t, ss), "ekg_knowledge_extract", extract_schema)
-    if isinstance(got, dict):
-        return {"status": "error", "reason": _error(got)}
+    got, failed = await ask_split(ask, t.sources, lambda ss: extract_prompt(t, ss), "ekg_knowledge_extract", extract_schema)
+    if not got:
+        return {"status": "error", "reason": _error(failed[0][1])}
+    part = unanswered(failed)
     by_label = {s.label: s for s in t.sources}
     items, dropped = [], collections.Counter()
     for shown, ans in got:
@@ -460,7 +567,8 @@ async def settle(t: Task, responses: Responses, v=None):
                 owner = by_label.get(x.get("owner"))
                 items.append({**x, "source": src.label, "source_id": src.id, "owner_id": owner.id if owner else None})
     if not items:
-        return {"status": "rejected", "reason": "llm: nothing worth keeping" if not dropped else ", ".join(dropped), "dropped": dict(dropped)}
+        return {"status": "rejected", "reason": "llm: nothing worth keeping" if not dropped else ", ".join(dropped),
+                "dropped": dict(dropped), **part}
     # the judge reads the same text again with the items under it; items that would not fit go in a further call
     room = BUDGET.prompt_chars - len(judge_items_prompt(t, []))
     batches, cur, used = [], [], 0
@@ -485,8 +593,8 @@ async def settle(t: Task, responses: Responses, v=None):
         if f"K{i + 1}" not in ok:
             dropped["llm judge: rejected"] += 1
     if not kept:
-        return {"status": "rejected", "reason": "llm judge: rejected every item", "dropped": dict(dropped)}
-    return {"status": "accepted", "items": kept, "dropped": dict(dropped)}
+        return {"status": "rejected", "reason": "llm judge: rejected every item", "dropped": dict(dropped), **part}
+    return {"status": "accepted", "items": kept, "dropped": dict(dropped), **part}
 
 
 # ---------------------------------------------------------------- writing accepted answers
@@ -517,6 +625,7 @@ class Writer:
         # run() writes every table's rows before any table's links (a commit log's pull request is then the one
         # the merge log made); extract_tables.apply leaves each table's link pass here while this is set
         self.defer_table_links, self.table_links = False, []
+        self.thin_pending = []   # bare first names in table link cells, settled after every table's links (resolve_thin)
         self.stated_items = {}   # (document, type, the item's own id) -> the record made for that numbered item
 
     @property
@@ -781,7 +890,12 @@ def table_acceptance(entries):
                     "links": sorted({l["link"] for l in m.get("links", [])}),
                     **({"also_text": m["also_text"]} if m.get("also_text") else {}),
                     "reason": (e.get("reason") or "")[:200],
-                    **({"completion_tokens": e["usage"].get("completion_tokens")} if isinstance(e.get("usage"), dict) else {})})
+                    **({"completion_tokens": e["usage"].get("completion_tokens")} if isinstance(e.get("usage"), dict) else {}),
+                    **({"prompt_chars": e["steps"]["prompt_chars"]} if (e.get("steps") or {}).get("prompt_chars") else {}),
+                    **({"tier": e["steps"]["tier"]} if (e.get("steps") or {}).get("tier") else {}),
+                    **({"refused_by_the_guard": e["steps"]["refused"]} if (e.get("steps") or {}).get("refused") else {}),
+                    **({"retried_after": e["retried_after"]} if e.get("retried_after") else {}),
+                    **({"mapping_from": e["mapping_from"]} if e.get("mapping_from") else {})})
     return out
 
 
@@ -801,6 +915,8 @@ def coverage(answered):
         row["follow_up_calls"] += sum(r["calls"] for r in cov["rounds"])
         row["items_from_follow_ups"] += sum(r["items_kept"] for r in cov["rounds"])
         row["quotes_cited_in_another_passage"] += (e.get("fixed") or {}).get("quote found in another passage of the window: cited there", 0)
+        row["passages_unanswered"] += len(cov.get("passages_unanswered") or [])   # asked again next run
+        row["quotes_not_in_their_source"] += (e.get("dropped") or {}).get("check: quote not in its source", 0)
     return {title: {**row, "items_per_1000_chars": round(1000 * row["items"] / max(row["chars"], 1), 2)}
             for title, row in sorted(by.items())}
 
@@ -844,9 +960,10 @@ SCHEMA_GAPS = [
 
 
 def run(graph: Path, query_master: Path, out: Path | None = None, kinds=None, limit=None, mode="dry",
-        smoke=2, concurrency=16, model=None, log=None, window_tokens=None, docs=None, max_reply_tokens=None):
+        smoke=2, concurrency=16, model=None, log=None, window_tokens=None, docs=None, max_reply_tokens=None, only=None):
     """mode: dry (build and count, no LLM), smoke (`smoke` real calls, nothing written), run (ask, check, write).
     limit: ask at most this many new tasks per kind. docs: read at most this many documents (evenly spaced).
+    only: read only these documents (record ids, keys, native ids, paths or titles).
     max_reply_tokens: the provider's cap on one reply, when the backend cannot say (OpenRouter lists it)."""
     global BUDGET
     log = log or _say
@@ -865,7 +982,7 @@ def run(graph: Path, query_master: Path, out: Path | None = None, kinds=None, li
     cap, cap_from = llm.reply_limit(max_reply_tokens)
     BUDGET = fill_budget.sizes(window, window_from, max_reply_tokens=cap, reply_source=cap_from)
     report["budget"] = BUDGET.describe()
-    report["sampling"] = {"limit_new_tasks_per_kind": limit, "documents_sampled": docs}
+    report["sampling"] = {"limit_new_tasks_per_kind": limit, "documents_sampled": docs, "documents_only": only}
     log(f"LLM: {report['model']}   window {BUDGET.window_tokens:,} tokens ({BUDGET.source}): a prompt may take "
         f"{BUDGET.prompt_tokens:,} tokens = {BUDGET.prompt_chars:,} characters, the reply keeps {BUDGET.reply_tokens:,}"
         + (f" (the provider's reply limit, {cap_from})" if cap else " (no reply limit known)")
@@ -880,7 +997,7 @@ def run(graph: Path, query_master: Path, out: Path | None = None, kinds=None, li
             graph_report = json.loads((graph / "report.json").read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             pass
-    v = View(records, links, budget=BUDGET, doc_sample=docs, doc_quality=fill_docs.load_quality(graph_report))
+    v = View(records, links, budget=BUDGET, doc_sample=docs, doc_quality=fill_docs.load_quality(graph_report), doc_only=only)
     built = {}
 
     def build_kind(k):
@@ -944,6 +1061,8 @@ def run(graph: Path, query_master: Path, out: Path | None = None, kinds=None, li
         return report
 
     responses = Responses(out / "responses.jsonl", report["model"], concurrency)
+    from . import extract_tables
+    extract_tables.MAPPINGS = extract_tables.MappingCache(out / "table_mappings.json") if mode == "run" else None
     log(f"  {len(responses.seen):,} responses kept from earlier runs")
 
     if mode == "smoke":
@@ -976,7 +1095,7 @@ def run(graph: Path, query_master: Path, out: Path | None = None, kinds=None, li
         for t in tasks:
             e = seen.get(t.id)
             if (e and e["status"] in ("accepted", "rejected") and e.get("model") == report["model"]
-                    and e.get("prompt_version") == PROMPT_VERSION):
+                    and e.get("prompt_version") == PROMPT_VERSION and not e.get("unanswered")):
                 entry[t.id] = e
                 stats[t.kind]["cached"] += 1
             elif limit is not None and asked_n[t.kind] >= limit:
@@ -1060,6 +1179,8 @@ def run(graph: Path, query_master: Path, out: Path | None = None, kinds=None, li
             for links_pass in w.table_links:
                 links_pass()
             w.table_links = []
+            extract_tables.resolve_thin(w)   # bare first names, now that every table's links are in
+            report["kinds"]["table_map"]["mappings_from_cache"] = extract_tables.MAPPINGS.hits if extract_tables.MAPPINGS else 0
             entries = [(t, seen.get(t.id) or {}) for t in built["table_map"][0]]
             mapped = {u for t, e in entries if e.get("status") == "accepted" and not (e.get("mapping") or {}).get("also_text")
                       for u in t.write["units"]}

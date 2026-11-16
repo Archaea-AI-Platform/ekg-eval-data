@@ -259,14 +259,16 @@ def _one(g, m, folder, s, lists, messages, addresses, threads, decided, in_list,
             g.notes[f"mail: relayed sender not recovered ({how}; sender_name kept, no FROM link)"] += 1
     for cc_name, cc in email.utils.getaddresses([header(m["Cc"])] if m["Cc"] else []):
         cc = cc.lower()
-        if cc and "@" in cc and cc not in lists and cc != relayed:  # the relayed sender's own copy is not a recipient
+        if cc and "@" in cc and cc not in lists:  # every Cc stays a recipient, as the message states it
             if cc not in addresses:
                 addresses[cc] = g.rec("EmailAddress", "email", cc, {"address": cc, "display_name": cc_name or None,
                                       "normalized_value": cc}, lst["scope"])
             g.link("SENT_TO", msg, addresses[cc], "field", role="cc", at=sent)
+    # what the message is (a person's message or an integration's notice) is read from its stated From, never from
+    # an inferred sender
+    tool = notifiers.get(sender)
     if relayed:
         sender, name = relayed, orig_name or name
-    tool = notifiers.get(sender)
     if not sender:
         g.notes["mail: From header with no parseable address"] += 1
     elif sender in lists:

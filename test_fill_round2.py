@@ -114,14 +114,15 @@ def coverage_checks(check):
           and sorted(r["props"]["title"] for r in base.written(out, tmp)[0] if r["type"] == "Requirement") == [f"REQ-{n:02d}" for n in range(1, 16)]
           and room > 0 and follow)
 
-    # a model that never adds anything on a follow-up: exactly COVERAGE_ROUNDS rounds, then counted
+    # a model that never adds anything on a follow-up: one round (a second would send the very same passages), counted
     g = base.base_graph()
     spec_doc(g)
     model = Lazy(follow=False)
     rep, out, tmp = f1.run_fill(g, model, ["doc_facts"])
     cov = [e for e in base.rows(out / "ledger.jsonl") if e["kind"] == "doc_facts"][0]["coverage"]
-    check(f"coverage: the follow-ups are bounded ({extract_facts.COVERAGE_ROUNDS} rounds), then what is left is counted, never looped on",
-          len(cov["rounds"]) == extract_facts.COVERAGE_ROUNDS and all(r["items_kept"] == 0 for r in cov["rounds"])
+    check("coverage: a follow-up round that keeps nothing ends the follow-ups (the next would ask the very same passages "
+          "again); what is left is counted, never looped on",
+          len(cov["rounds"]) == 1 and all(r["items_kept"] == 0 for r in cov["rounds"])
           and cov["passages_with_items"] == 1 and cov["paragraphs_read_nothing_kept"] >= 14)
 
     # follow-up answers citing the passage next to the right one: cited where the quote really is
@@ -208,14 +209,16 @@ def tool_table_checks(check):
     recs, links, by_id = base.written(out, tmp)
     c = rep["written"]["documents_and_tables"]
     led = {e["status"]: e for e in base.rows(out / "ledger.jsonl") if e["kind"] == "table_map"}
-    tprompt = next(p for n, p in model.calls if n == "ekg_table_map")
+    tprompt = next(p for n, p in model.calls if n == "ekg_table_shape")
+    cprompt = next(p for n, p in model.calls if n == "ekg_table_map" and '"PR / module"' in p)
     prs = {r["props"].get("number"): r for r in by_id.values() if r["type"] == "PullRequest"}
     L = collections.defaultdict(set)
     for lk in links:
         L[lk["type"]].add((lk["a"], lk["b"]))
-    check("tool tables: the table prompt lists the other tools' record types and their links (PullRequest, AUTHORED_BY, APPROVED_BY)",
-          "RECORD TYPES OF OTHER TOOLS" in tprompt and "- PullRequest:" in tprompt and "- APPROVED_BY:" in tprompt
-          and "c2.1" in str(model.calls) or "cell_parts" in tprompt)
+    check("tool tables: step 1 lists the other tools' record types (PullRequest); step 2 the links between the table's "
+          "types (AUTHORED_BY, APPROVED_BY)",
+          "export of another tool" in tprompt and "- PullRequest:" in tprompt and "cell_parts" in tprompt
+          and "- AUTHORED_BY:" in cprompt and "- APPROVED_BY:" in cprompt)
     check("tool tables: a merge log maps to PullRequest rows; the composite 'PR / module' cell is split by the stated separator",
           set(prs) == {174, 181, 187} and rep["kinds"]["table_map"].get("accepted") == 4)
     check("tool tables: a row matches the tool's own record by its key field first (#174 is the existing GitHub PR, not a copy)",
@@ -228,10 +231,11 @@ def tool_table_checks(check):
           (pr174["id"], acct["lionel"]["id"]) in L["AUTHORED_BY"] and (pr174["id"], acct["suzan"]["id"]) in L["APPROVED_BY"]
           and (prs[181]["id"], acct["emma"]["id"]) in L["APPROVED_BY"] and (prs[181]["id"], acct["suzan"]["id"]) in L["APPROVED_BY"])
     check("tool tables: a link end the graph lacks is made from the table like a row (Account 'noahp'), counted; "
-          "Maya, a Person with no account, cannot be an APPROVED_BY end: counted, not dropped",
+          "'mayac' read as a Person is one bare word: never made a Person of its own, counted, not dropped",
           c.get("Account: created from a table row (no such record from its tool yet)") == 1
           and any(by_id[b]["props"].get("login") == "noahp" for _, b in L["AUTHORED_BY"])
-          and c.get("APPROVED_BY skipped: the schema needs another kind of record at one end, and there is not exactly one") == 1)
+          and c.get("Person: a bare first name that no record could be, not linked (not created)") == 1
+          and not any(r["type"] == "Person" and r["props"].get("full_name") == "mayac" for r in recs))
     check("tool tables: the module half of the split cell, with no field, is counted",
           c.get("no field for this column: PR / module (part 2)") == 3)
     commits = [r for r in by_id.values() if r["type"] == "Commit"]
@@ -264,8 +268,12 @@ def tool_table_checks(check):
     model.facts = lambda p: (seen.append(base.shown(p)), {"records": [], "links": []})[1]
     rep, out, tmp = f1.run_fill(g, model, ["table_map", "doc_facts"])
     led = [e for e in base.rows(out / "ledger.jsonl") if e["kind"] == "table_map"]
-    check("tool tables: a cell split the sample rows do not all follow rejects the mapping; the table is then read as text",
-          led and led[0]["status"] == "rejected" and "does not parse the sample row cell \"Noah\"" in led[0]["reason"]
+    check("tool tables: a cell split the sample rows do not all follow rejects the mapping and asks again with the reason; "
+          "when the corrected one still misses that cell, the split is kept for the rows it parses, the cell that does "
+          "not split is listed and counted, and the table is read as text too",
+          led and led[0]["status"] == "accepted" and "does not parse the sample row cell \"Noah\"" in led[0]["retried_after"]
+          and led[0]["mapping"]["also_text"]["cells_that_do_not_split"] == ["c2: Noah"]
+          and rep["written"]["documents_and_tables"].get("cell skipped: c2 does not split as the mapping states") == 1
           and any("Lionel Ray 42" in s for s in seen))
 
     # a tool type with neither its name nor a key field cannot be matched: rejected
@@ -332,8 +340,10 @@ def people_checks(check):
     check("people: a composite cell used as a person's name is rejected by code and asked again once, with the reason",
           any("AN EARLIER MAPPING" in p and "every sample cell holds more than a name" in p for n, p in model.calls)
           and any(e.get("retried_after", "").startswith("check: column c2 names a Person") and e["status"] == "accepted" for e in led))
-    check("people: three tables and a paragraph naming the same people make ONE Person each (Suzan, Mahesh, Emma; Mack from a manager cell)",
-          people == {"Suzan": 1, "Mahesh": 1, "Emma": 1, "Mack": 1})
+    check("people: three tables and a paragraph naming the same people make ONE Person each (Suzan, Mahesh, Emma); 'Mack', "
+          "only ever a bare first name in a manager cell, is never made a Person (counted)",
+          people == {"Suzan": 1, "Mahesh": 1, "Emma": 1}
+          and rep["written"]["documents_and_tables"].get("Person: a bare first name that no record could be, not linked (not created)", 0) >= 1)
     suzan = next(r for r in recs if r["props"].get("full_name") == "Suzan")
     check("people: the richest table wrote first: Suzan carries the directory's id, email and title, the composite parts in their fields",
           suzan["props"].get("hr_worker_id") == "E004" and suzan["props"].get("work_email") == "suzan@acme.com"

@@ -47,7 +47,9 @@ CHARS_PER_TOKEN = 3.0             # query-master's DEFAULT_CHARS_PER_TOKEN; llm.
 TYPICAL_CHARS_PER_TOKEN = 4.0     # for cost estimates only (English prose); sizing always uses CHARS_PER_TOKEN
 READ_SHARE_OF_REPLY = 0.5         # an extraction call reads at most this share of its reply room in text (see above)
 SLOW_TOKENS_PER_SECOND = 40      # Glimmer on OpenRouter wrote at least ~57 tokens/s (ACME v5: 14 mappings, up to 11,000
-                                  # tokens each, all done within 3.5 minutes at 16 in flight); 40 leaves room
+                                  # tokens each, all done within 3.5 minutes at 16 in flight); 40 leaves room. Slower when
+                                  # this run's calls were slower (fill.slow_pace: ACME v8, three runs at once)
+MAPPING_SECONDS_MAX = 1_200       # however slow the provider is, a mapping step is given up after 20 minutes
 INSTRUCTION_CHARS = 10_000        # the rules, the reply format and a document's outline, besides the schema and the text
 
 

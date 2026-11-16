@@ -179,7 +179,8 @@ def make_repo(tmp: Path, data: Path):
             (b, [a], "two", "Bob Ruiz", "bob@acme.io", "GitHub", "noreply@github.com", "2026-10-02T12:30:00+00:00")):
         rows.append({"sha": sha, "parents": parents, "author_name": an, "author_email": ae, "authored_at": at,
                      "committer_name": cn, "committer_email": ce, "committed_at": at, "message": msg,
-                     "files": [{"status": "A" if not parents else "M", "path": "f.txt"}]})
+                     "files": [{"status": "A" if not parents else "M", "path": "f.txt"}]
+                     + ([] if parents else [{"status": "D", "path": "old/gone.py"}])})
     (data / "git" / "commits.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
     return {"A": a, "B": b, "C": c}
 
@@ -200,6 +201,7 @@ def build_main(tmp: Path):
     repo["owner"] = {"login": "acme", "id": 77, "type": "Organization"}
     repo["created_at"] = "2020-01-01T00:00:00Z"
     (data / "github" / "repo.json").write_text(json.dumps(repo), encoding="utf-8")
+    (data / "github" / "labels.json").write_text(json.dumps([{"name": "Build"}, {"name": "payments"}]), encoding="utf-8")
     (data / "github" / "pulls" / "pr-43.json").write_text(json.dumps(PR43), encoding="utf-8")
     (data / "jira" / "issues").mkdir(parents=True)
     (data / "jira" / "statuses.json").write_text(json.dumps([{"statuses": [
@@ -216,7 +218,8 @@ def build_main(tmp: Path):
                                        "          configuration-path: .github/configs/labeler.yml\n",
         ".github/configs/labeler.yml": "payments:\n- changed-files:\n  - any-glob-to-any-file:\n    - 'src/a/**'\n"
                                        "build:\n- changed-files:\n  - any-glob-to-any-file: ['*.gradle']\n"
-                                       "  - head-branch: ['^src']\n",
+                                       "  - head-branch: ['^src']\n"
+                                       "nolabel:\n- 'src/**'\n",
         "CODEOWNERS": "# owners\n/src/a/ @bob-gh\n*.py @alice-gh @acme/team\n",
     }.items():
         (code / path).parent.mkdir(parents=True, exist_ok=True)
@@ -255,6 +258,45 @@ def build_roster(tmp: Path):
     return report, G(out)
 
 
+def wiki_url_checks(check):
+    """The wiki tool's page-address forms, through the linker: a piece's link and its page's document-level copy."""
+    import base64
+    from ekg_adapters import common, linker
+    from ekg_adapters.common import Graph
+    common.bind(QM)
+    g = Graph(observed_at="2026-10-05T00:00:00Z")
+    g.ctx["source_urls"] = {"wiki": "https://wiki.example.org/confluence/rest"}
+    g.ctx["scope_by_tool"] = {}
+    sc = [["public"]]
+    src = g.rec("Document", "confluence", "1", {"title": "KIP-2: Uses It", "kind": "wiki_page"}, sc)
+    dst = g.rec("Document", "confluence", "263430272", {"title": "KIP-1: Cross-Cluster Replication", "kind": "wiki_page"}, sc)
+    g.ctx["documents_by_id"] = {("confluence", "1"): src, ("confluence", "263430272"): dst}
+    g.ctx["documents_by_title"] = {("confluence", "kafka", "kip-2: uses it"): src,
+                                   ("confluence", "kafka", "kip-1: cross-cluster replication"): dst}
+    tiny = base64.b64encode((263430272).to_bytes(8, "little")).decode().rstrip("=").rstrip("A").replace("/", "-").replace("+", "_")
+    urls = {"title": "https://wiki.example.org/confluence/display/KAFKA/KIP-1%3A+Cross-Cluster+Replication",
+            "viewpage": "https://wiki.example.org/confluence/pages/viewpage.action?spaceKey=KAFKA&title=KIP-1%3A+Cross-Cluster+Replication",
+            "page_id": "https://wiki.example.org/confluence/pages/viewpage.action?pageId=263430272",
+            "tiny": f"https://wiki.example.org/x/{tiny}",
+            "missing": "https://wiki.example.org/confluence/display/KAFKA/No+Such+Page",
+            "other_host_tiny": f"https://elsewhere.example.com/x/{tiny}"}
+    pieces = {}
+    for name, url in urls.items():
+        pieces[name] = g.rec("Piece", "confluence", f"1:{name}", {"text": url}, sc)
+        g.ref(pieces[name], "LINKS_TO", "Url", url, "field", 0.95, kind="url")
+        g.ref(src, "LINKS_TO", "Url", url, "field", 0.95, kind="url", evidence=[pieces[name]], only="Document")
+    res = linker.resolve(g)
+    hit = lambda a, b: any(lk["type"] == "LINKS_TO" and lk["a"] == a["id"] and lk["b"] == b["id"] for lk, _, _ in g.links.values())
+    check("wiki urls: /display/SPACE/Title+With+Pluses, viewpage.action?title=, ?pageId= and a tiny link each reach the page",
+          all(hit(pieces[n], dst) for n in ("title", "viewpage", "page_id", "tiny")))
+    check("wiki urls: the linking page itself LINKS_TO the page it links (the piece is the evidence)",
+          hit(src, dst) and pieces["title"]["id"] in next(lk for lk, _, _ in g.links.values()
+                                                         if lk["a"] == src["id"] and lk["b"] == dst["id"])["props"]["evidence"])
+    check("wiki urls: unresolved page addresses are counted by form; a tiny link on another host is no page address",
+          res["wiki_page_addresses"].get("title: unresolved") == 1 and res["wiki_page_addresses"].get("tiny: resolved") == 1
+          and not hit(pieces["other_host_tiny"], dst))
+
+
 def main() -> int:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     checks = []
@@ -287,7 +329,13 @@ def main() -> int:
     check("mail: a relayed sender kept in Cc under the same name gets FROM, method inferred, kind relayed",
           len(frm) == 1 and frm[0]["props"]["method"] == "inferred" and frm[0]["props"]["kind"] == "relayed"
           and frm[0]["props"]["confidence"] < 1)
-    check("mail: the relayed sender's own Cc copy is not a recipient", not g.linked("SENT_TO", msgs["<p2@acme.io>"], carol))
+    check("mail: what the message states stays: every Cc (the relayed sender's own copy too) is a recipient, "
+          "no field-method FROM, sender_name and self_reported_sender set",
+          g.linked("SENT_TO", msgs["<p2@acme.io>"], carol, role="cc")
+          and not [lk for lk in by_type("FROM") if lk["a"] == msgs["<p2@acme.io>"]["id"] and lk["props"]["method"] == "field"]
+          and msgs["<p2@acme.io>"]["props"].get("sender_name") == "Carol Diaz"
+          and msgs["<p2@acme.io>"]["props"].get("self_reported_sender") is True
+          and "via eng" in msgs["<p2@acme.io>"]["props"].get("from_header", ""))
     check("mail: the relayed sender takes part in the thread",
           any(lk["a"] == carol["id"] and lk["b"] == thread_of[msgs["<p2@acme.io>"]["id"]] for lk in by_type("PARTICIPATED_IN")))
     check("mail: a relayed sender nothing preserves gets no FROM, and is counted",
@@ -365,7 +413,12 @@ def main() -> int:
     payments = g.one("Label", name="payments", kind="code")
     check("code: the labeler config's folder glob gives that Folder the label (HAS_LABEL)",
           g.linked("HAS_LABEL", folder("src/a"), payments))
-    build = g.one("Label", name="build", kind="code")
+    build = g.one("Label", name="Build", kind="code")
+    check("code: a config label matches the host's label without regard to case; one the host lacks is counted, not made",
+          not [r for r in g.recs if r["type"] == "Label" and r["props"]["name"] in ("build", "nolabel")]
+          and report["notes"].get("code: labeler config labels the code host does not have (not linked)") == 1)
+    check("github: every code-host label is IN its Repository",
+          all(g.linked("IN", r, repo) for r in g.recs if r["type"] == "Label" and r["props"]["kind"] == "code"))
     gradle = next(r for r in g.recs if r["type"] == "File" and r["props"]["path"] == "build.gradle")
     check("code: a file glob gives the files it matches the label; branch matchers are not paths",
           g.linked("HAS_LABEL", gradle, build) and not [lk for lk in by_type("HAS_LABEL") if lk["b"] == build["id"]
@@ -378,8 +431,14 @@ def main() -> int:
     check("code: an unanchored pattern owns matching files anywhere; a team owner is counted, not linked",
           g.linked("OWNED_BY", refunds, acc(500)) and report["notes"].get(
               "code: code owners not linked (a team, an address or an unknown login)", 0) >= 1)
-    check("code: a PR is ABOUT the deepest folder holding every file it changed",
-          g.linked("ABOUT", pr43, folder("src/a"), kind="changed_folder"))
+    gone = next(r for r in g.recs if r["type"] == "File" and r["props"]["path"] == "old/gone.py")
+    check("code: a file only history names is IN its (history-only) folder, so a walk from the folder finds its change",
+          g.linked("IN", gone, folder("old")) and g.linked("CHANGES", ca, gone))
+    check("code: no change -> folder shortcut links (the walk Folder <-IN- File <-CHANGES- is the way)",
+          not [lk for lk in by_type("ABOUT") if rec[lk["b"]]["type"] == "Folder"])
+    roles = {lk["props"].get("role") for lk in by_type("AUTHORED_BY") if rec[lk["a"]]["type"] == "Commit"}
+    check("git: every commit authorship link has a role (author, committer or co_author)",
+          roles <= {"author", "committer", "co_author"} and {"author", "committer"} <= roles)
 
     # ---- people: a chair change
     t = r_report["totals"]
@@ -397,6 +456,7 @@ def main() -> int:
     now = [lk for lk in rg.linked("HOLDS_POSITION", ben_p, chair) if change["id"] in lk["props"]["evidence"]]
     check("roster: the term it started carries it as evidence", bool(now))
 
+    wiki_url_checks(check)
     for name, ok in checks:
         print(f"  {'PASS' if ok else 'FAIL'}  {name}")
     passed = sum(ok for _, ok in checks)

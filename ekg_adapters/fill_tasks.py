@@ -88,10 +88,10 @@ class Task:
 class View:
     """Read-only lookups over the written graph."""
 
-    def __init__(self, records, links, budget=None, doc_sample=None, doc_quality=None):
+    def __init__(self, records, links, budget=None, doc_sample=None, doc_quality=None, doc_only=None):
         self.budget = budget or fill_budget.sizes()   # what one call may carry
         self.overhead = {}                            # kind -> characters of instructions and schema around the text
-        self.doc_sample, self.doc_quality = doc_sample, doc_quality or {}
+        self.doc_sample, self.doc_quality, self.doc_only = doc_sample, doc_quality or {}, doc_only
         self.cut = collections.Counter()              # texts larger than a whole window, cut at line ends, by kind
         self.quoted = collections.Counter()           # characters of quoted earlier messages left out (dequote), by kind
         self.claimed = set()                          # table pieces a table_map task reads: the reading kinds leave them out
@@ -148,7 +148,7 @@ class View:
     # ---- documents (fill_docs), read once
     def docs(self):
         if self._docs is None:
-            self._docs = fill_docs.documents(self, self.doc_sample, self.doc_quality)
+            self._docs = fill_docs.documents(self, self.doc_sample, self.doc_quality, self.doc_only)
         return self._docs
 
     def catalog(self):
@@ -162,6 +162,7 @@ class View:
         if self._names is None:
             self._names = collections.defaultdict(list)
             self._prefix = collections.defaultdict(dict)   # leading words of a longer personal name -> {record id: None}
+            self._tail = collections.defaultdict(dict)     # the last part of a qualified name ("owner/name") -> {id: None}
             reg = common._reg  # the links that tie one identity's records together (a person, its accounts, its addresses)
             self._identity = {n for n, lk in reg.links.items() if lk.relation in ("ALIAS_OF", "HAS_ACCOUNT")}
             for r in self.rec.values():
@@ -181,6 +182,9 @@ class View:
             for x in val if isinstance(val, list) else [val]:
                 if isinstance(x, str) and (k := name_key(x)) and r["id"] not in self._names[k]:
                     self._names[k].append(r["id"])
+        for f in extract_schema.names_of(spec):
+            if isinstance(p.get(f), str) and QUALIFIED.fullmatch(k := name_key(p[f])):
+                self._tail[k.rsplit("/", 1)[1]][r["id"]] = None
         full = p.get(extract_schema.PERSONAL_NAME)
         words = name_key(full).split() if isinstance(full, str) else []
         for n in range(1, len(words)):   # "emma", "emma van" for "Emma van Dijk"
@@ -238,6 +242,31 @@ class View:
                 vals |= {name_key(str(other["props"][f])) for f in extract_schema.names_of(spec) if other["props"].get(f)}
         return vals - {""}
 
+    def by_name_tail(self, name, types):
+        """Records of `types` whose name is a qualified one ("owner/name", no spaces) ending in this one-part name:
+        "payments-platform" -> the ONE "acme-commerce/payments-platform". Several such records: none (ambiguous)."""
+        self._index()
+        k = name_key(name)
+        if not k or not SIMPLE.fullmatch(k):
+            return []
+        hits = [self.rec[i] for i in self._tail.get(k, ()) if self.rec[i]["type"] in types]
+        return hits if len(hits) == 1 else []
+
+    def linked(self, a, b):
+        """Is record `a` linked to `b` or to one of the records of b's identity (its accounts, addresses, aliases)?"""
+        self._index()
+        ids, frontier = {b["id"]}, [b["id"]]
+        for _ in range(2):
+            nxt = []
+            for i in frontier:
+                for lk in self.out[i] + self.inn[i]:
+                    o = lk["b"] if lk["a"] == i else lk["a"]
+                    if lk["type"] in self._identity and o not in ids:
+                        ids.add(o)
+                        nxt.append(o)
+            frontier = nxt
+        return any((lk["b"] if lk["a"] == a["id"] else lk["a"]) in ids for lk in self.out[a["id"]] + self.inn[a["id"]])
+
     def by_first_name(self, name, types):
         """Records of `types` whose personal name (full_name) starts with this one word: 'Emma' -> 'Emma Stone'."""
         self._index()
@@ -275,6 +304,10 @@ class View:
             if p.get("is_bot") or p.get("kind") == "automation" or (p.get("login") or "").endswith("[bot]"):
                 return True
         return False
+
+
+QUALIFIED = re.compile(r"[^\s/]+(?:/[^\s/]+)+")   # a name written with its namespace: owner/name, group/sub/name
+SIMPLE = re.compile(r"[^\s/]+")
 
 
 def _field_key(value):

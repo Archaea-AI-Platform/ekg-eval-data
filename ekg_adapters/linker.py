@@ -22,6 +22,7 @@ Documents queue five more kinds of target (see docgraph.py):
   EmailAddress     an address written in the text, when the graph has that address
 """
 
+import base64
 import collections
 import re
 import urllib.parse
@@ -36,6 +37,8 @@ GH_URL = re.compile(r"https?://(?:www\.)?github\.com/([\w.-]+/[\w.-]+)/(pull|iss
 TICKET_URL = re.compile(r"https?://[^/\s]+/(?:[\w-]+/)?browse/([A-Z][A-Z0-9_]*-\d+)|https?://linear\.app/[\w-]+/issue/([A-Z][A-Z0-9]+-\d+)")
 PAGE_ID_URL = re.compile(r"[?&]pageId=(\d+)|/pages/(\d+)(?:[/?#]|$)")
 PAGE_TITLE_URL = re.compile(r"/display/([^/?#]+)/([^?#]+)")
+WIKI_HOSTS = set()  # the wiki tool's own hosts (from the manifest's sources), set by resolve()
+TINY_URL = re.compile(r"/x/([A-Za-z0-9_-]{2,11})(?:[/?#]|$)")
 MBOX_URL = re.compile(r"mod_mbox/[^\"']*?/(?:%3[Cc]|<)(.+?)(?:%3[Ee]|>)")
 DOC_KINDS = {"Url": "outside address", "DocumentByTitle": "Document", "DocumentById": "Document", "FileByPath": "File",
              "AccountByKey": "Account", "EmailAddress": "EmailAddress"}
@@ -64,14 +67,43 @@ def _url_target(g: Graph, url: str, issues, prs):
         pages = g.ctx["_pages_for_urls"] = (
             {pid: d for (_, pid), d in g.ctx.get("documents_by_id", {}).items()},
             {(sp, t): d for (_, sp, t), d in g.ctx.get("documents_by_title", {}).items()})
-    if pages[0] or pages[1]:
-        m = PAGE_ID_URL.search(url)
-        if m and (m.group(1) or m.group(2)) in pages[0]:
-            return pages[0][m.group(1) or m.group(2)]
-        m = PAGE_TITLE_URL.search(url)
-        if m:
-            return pages[1].get((m.group(1).lower(), urllib.parse.unquote_plus(m.group(2)).casefold()))
+    form = page_url_form(url)
+    if form and (pages[0] or pages[1]):
+        pid, space, title = page_url_key(url, form)
+        hit = pages[0].get(pid) if pid else pages[1].get(((space or "").lower(), title.casefold())) if title else None
+        return hit
     return None
+
+
+def page_url_form(url: str):
+    """Which of the wiki tool's standard page-address forms a URL is, or None: page_id (?pageId=N, /pages/N/...),
+    title (/display/SPACE/Title+With+Pluses, or viewpage.action?spaceKey=S&title=T) or tiny (/x/<code>)."""
+    if PAGE_ID_URL.search(url):
+        return "page_id"
+    if PAGE_TITLE_URL.search(url) or ("viewpage.action" in url and "title=" in url):
+        return "title"
+    if TINY_URL.search(url):  # a tiny link's code is only a page id on the wiki tool's own host
+        return "tiny" if urllib.parse.urlsplit(url).netloc.lower() in WIKI_HOSTS else None
+    return None
+
+
+def page_url_key(url: str, form: str):
+    """(page id, space, title) a page address names. A tiny link's code is the page id itself: the id's bytes, little
+    endian with trailing zero bytes dropped, in base64 with '/' written '-' and '+' written '_' and the padding cut."""
+    if form == "page_id":
+        m = PAGE_ID_URL.search(url)
+        return m.group(1) or m.group(2), None, None
+    if form == "tiny":
+        code = TINY_URL.search(url).group(1)
+        if len(code) > 11:
+            return None, None, None
+        raw = base64.b64decode(code.replace("-", "/").replace("_", "+").ljust(11, "A") + "=")
+        return str(int.from_bytes(raw, "little")), None, None
+    m = PAGE_TITLE_URL.search(url)
+    if m:
+        return None, urllib.parse.unquote(m.group(1)), urllib.parse.unquote_plus(m.group(2)).strip("/")
+    q = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)
+    return None, (q.get("spaceKey") or [""])[0], (q.get("title") or [""])[0]
 
 
 def _document(g: Graph, tool, space, title):
@@ -95,15 +127,24 @@ def resolve(g: Graph):
     resolved, unresolved, stubbed = collections.Counter(), collections.Counter(), collections.Counter()
     outside = collections.Counter()
     addresses = None   # EmailAddress records by address, built when first asked for
+    WIKI_HOSTS.clear()
+    WIKI_HOSTS.update(urllib.parse.urlsplit(u).netloc.lower() for k, u in (g.ctx.get("source_urls") or {}).items()
+                      if k in ("wiki", "confluence") and isinstance(u, str))
+    page_urls = collections.Counter()  # (form, resolved or not) of the wiki tool's page addresses
     for source, ltype, ttype, tkey, method, conf, stub, own in g.refs:
         own = dict(own)
         reverse, evidence = own.pop("reverse", False), own.pop("evidence", None)
+        only = own.pop("only", None)  # a second, document-level copy of a piece's link: only to that record type
         if ttype == "GitHubRef":
             target = issues.get(tkey) or prs.get(tkey)
         elif ttype == "Url":
             target = _url_target(g, tkey, issues, prs)
+            form = page_url_form(tkey)
+            if form and only is None:
+                page_urls[f"{form}: {'resolved' if target is not None and target['type'] == 'Document' else 'unresolved'}"] += 1
             if target is None:   # an address outside the graph: nothing to link to, and nothing wrong
-                outside[f"{source['type']} ({source['props']['source_tool']})"] += 1
+                if only is None:
+                    outside[f"{source['type']} ({source['props']['source_tool']})"] += 1
                 continue
         elif ttype == "DocumentByTitle":
             target = _document(g, *tkey)
@@ -120,7 +161,10 @@ def resolve(g: Graph):
             target = addresses.get(tkey)
         else:
             target = lookups[ttype].get(tkey)
-        if target is None and stub and ttype in STUB_PROPS:
+        if only is not None:
+            if target is None or target["type"] != only:
+                continue   # the piece's own reference is counted; its document-level copy only adds the link
+        elif target is None and stub and ttype in STUB_PROPS:
             tool, native, props = STUB_PROPS[ttype]
             if ttype == "Ticket":  # the key's prefix says which tracker it belongs to
                 tool = g.ctx.get("ticket_tool_by_prefix", {}).get(str(tkey).split("-")[0], tool)
@@ -143,4 +187,4 @@ def resolve(g: Graph):
         g.link(ltype, a, b, method, conf, evidence=evidence or [source], **own)
         resolved[label] += 1
     return {"resolved": dict(resolved), "unresolved": dict(unresolved), "stubbed_targets": dict(stubbed),
-            "outside_addresses": dict(outside)}
+            "outside_addresses": dict(outside), "wiki_page_addresses": dict(sorted(page_urls.items()))}

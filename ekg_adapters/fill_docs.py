@@ -201,8 +201,9 @@ def read(v, d) -> Doc | None:
     return Doc(d, current, title_of(d), units, outline)
 
 
-def documents(v, sample: int | None = None, quality: dict | None = None):
-    """Every document with text -> ([Doc], skipped counter). `sample` keeps that many, evenly spaced (test runs)."""
+def documents(v, sample: int | None = None, quality: dict | None = None, only=None):
+    """Every document with text -> ([Doc], skipped counter). `sample` keeps that many, evenly spaced (test runs);
+    `only` keeps the documents it names (a record id, key, native id, path or title, exactly)."""
     skipped, found = collections.Counter(), []
     for t in DOC_TYPES:
         for d in v.typed(t):
@@ -211,6 +212,11 @@ def documents(v, sample: int | None = None, quality: dict | None = None):
                 continue
             found.append(d)
     found.sort(key=lambda d: d["props"]["_key"])
+    if only:
+        names = {str(x).strip() for x in only}
+        keep = [d for d in found if names & {d["id"], *(str(d["props"].get(k)) for k in ("_key", "native_id", "path", "title", "name"))}]
+        skipped["not read: outside --only"] += len(found) - len(keep)
+        found = keep
     docs = []
     for d in found:
         doc = read(v, d)

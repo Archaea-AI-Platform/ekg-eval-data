@@ -167,7 +167,8 @@ def prefix_checks(check):
     g.rec("Person", "hr", "alex", {"full_name": "Alex"}, SCOPE)       # a pair already in the graph: reported
     base.add_doc(g, "stewards.pdf", [("Stewards", 1, [("table", "Module | Current steward | Manager | Effective\n"
                                                                  "ORD-CORE | Lionel / @lionel | Mahesh Rao | 2026-10-03\n"
-                                                                 "OPS-FULF | Noah / @noahp | n/a | 2026-01-01")])])
+                                                                 "OPS-FULF | Noah / @noahp | Mahesh Rao | 2026-01-01\n"
+                                                                 "OPS-PACK | Maya Chen / @mayac | n/a | 2026-01-01")])])
     m = {**STEWARDS_MAP, "links": [link("c1", "KNOWS_ABOUT", "Service"), link("c3", "REPORTS_TO", "Person")]}
     f1.Model.tables = {'"Current steward"': m}
     rep, out, tmp = f1.run_fill(g, f1.Model(), ["table_map"])
@@ -177,8 +178,10 @@ def prefix_checks(check):
     know = {(base._name(by_id[lk["a"]]), base._name(by_id[lk["b"]])) for lk in links if lk["type"] == "KNOWS_ABOUT"}
     check("prefix: 'Lionel' is the one 'Lionel eng-orders' whose own team is eng-orders: the same person, no new record",
           ("Lionel eng-orders", "ORD-CORE") in know and "Lionel" not in names)
-    check("prefix: 'Noah' is not 'Noah Patel' (the rest is no value of that record): a name alone never joins two",
-          names.get("Noah") == 1 and names.get("Noah Patel") == 1)
+    check("prefix: 'Noah' is not 'Noah Patel' (the rest is no value of that record): a name alone never joins two, and "
+          "a bare first name with no login, email or id beside it is never made a record of its own (counted)",
+          "Noah" not in names and names.get("Noah Patel") == 1
+          and c.get("row skipped: a bare first name (no full name, email, login or id): not created") == 1)
     check("prefix: 'n/a' is a placeholder, not a manager", c.get("placeholder cell (-, n/a ...): no link end, left out") == 1
           and "n/a" not in names)
     dup = rep["written"]["possible_duplicates"]

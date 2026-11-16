@@ -22,11 +22,16 @@ Internals and access types never take part.
 
 from __future__ import annotations
 
+import calendar
+import datetime as dt
 import re
 
 PROPER_NAMES = ("full_name", "name")                       # a type that has one is named by it and by nothing else
 PERSONAL_NAME = PROPER_NAMES[0]                            # a type named by this is named like a person (see extract_facts.thin)
 WRITER_LINK_FIELDS = ("method", "confidence", "evidence", "rule_id")  # set on every link by the writer, never from a text
+# the discriminator the registry gives for "one record carries several separate facts of this link" (part of the fact
+# key): a table column that holds it per row (the path within a repository a reviewer is for) splits facts rightly
+ASPECT = "aspect"
 OTHER_NAMES = ("title", "identifier", "address", "login")  # otherwise by any of these
 VERSION_NAME = "version"                                   # and a core-typed record with none of them by its version (a Release)
 NAME_FIELDS = PROPER_NAMES + OTHER_NAMES
@@ -147,7 +152,7 @@ class Catalog:
         for n, s in lk.fields.items():
             if n in WRITER_LINK_FIELDS or s.type == "object" or s.computed or s.extra or n in rules["computed_everywhere"]:
                 continue
-            if n in rules["link_discriminators"] and not s.enum and n not in lk.known_values:
+            if n in rules["link_discriminators"] and not s.enum and n not in lk.known_values and n != ASPECT:
                 continue
             out[n] = s
         return out
@@ -312,9 +317,71 @@ def placeholder(value) -> bool:
     return not s or s.casefold() in PLACEHOLDER_WORDS or not re.search(r"[^\W_]", s)
 
 
-def coerce(spec, value):
+# a month written by name: the calendar's own names and their abbreviations (Oct, October, Sept), the whole word
+_MONTHS = {**{calendar.month_abbr[i].casefold(): i for i in range(1, 13)},
+           **{calendar.month_name[i].casefold(): i for i in range(1, 13)}, "sept": 9}
+_MONTH_DAY = re.compile(r"(?<![^\W\d_])([^\W\d_]{3,9})\.?\s+(\d{1,2})(?:st|nd|rd|th)?(?:\s*[-–]\s*(\d{1,2})(?!\d))?"
+                        r"(?:,?\s+(\d{4}))?(?!\d)")
+_DAY_MONTH = re.compile(r"(?<!\d)(\d{1,2})(?:st|nd|rd|th)?\s+([^\W\d_]{3,9})\.?(?:,?\s+(\d{4}))?(?!\d)")
+_ISO_DAY = re.compile(r"(?<!\d)(\d{4})-(\d{2})-(\d{2})(?!\d)")
+
+
+def _ymd(y, mo, d):
+    try:
+        return dt.date(int(y), int(mo), int(d)).isoformat()
+    except ValueError:
+        return None
+
+
+def dates_in(text, year=None):
+    """Every calendar day a text writes, in order, as YYYY-MM-DD: ISO dates, and dates with the month by name
+    ("Oct 03, 2026", "3 October 2026", "Oct 03-07" = two days). A date written without its year takes `year` (the
+    caller's: the year of the table's or document's own full dates); without one it is not a date. Spans: [(start, end, day)]."""
+    s, out = str(text or ""), []
+    for m in _ISO_DAY.finditer(s):
+        if (d := _ymd(*m.groups())):
+            out.append((m.start(), m.end(), d))
+    for m in _MONTH_DAY.finditer(s):
+        mo = _MONTHS.get(m.group(1).casefold())
+        y = m.group(4) or year
+        if mo and y:
+            for day in [m.group(2)] + ([m.group(3)] if m.group(3) else []):
+                if (d := _ymd(y, mo, day)):
+                    out.append((m.start(), m.end(), d))
+    for m in _DAY_MONTH.finditer(s):
+        mo = _MONTHS.get(m.group(2).casefold())
+        y = m.group(3) or year
+        if mo and y and not any(a <= m.start() < b for a, b, _ in out) and (d := _ymd(y, mo, m.group(1))):
+            out.append((m.start(), m.end(), d))
+    return sorted(out)
+
+
+def year_of(texts):
+    """The year a table's or document's own full dates are in (the latest one written), as a string, or None: what a
+    date written without its year ("Oct 03") is read in."""
+    years = [int(y) for t in texts for y in re.findall(r"(?<!\d)((?:19|20)\d{2})(?!\d)", str(t or ""))]
+    return str(max(years)) if years else None
+
+
+def period(text, from_words=(), to_words=(), year=None):
+    """(valid_from, valid_to) a cell gives as a period, each YYYY-MM-DD or None: two dates are a start and an end
+    ("Oct 03-07"); one date is an end when an end word of the table's own (to_words, copied from its cells, e.g.
+    "Before") comes before it, else a start ("From Oct 08", "2026-10-08")."""
+    found = dates_in(text, year)
+    if not found:
+        return None, None
+    if len(found) >= 2:
+        return found[0][2], found[-1][2]
+    before = str(text)[:found[0][0]].casefold()
+    ends = any(w and w.casefold() in before for w in to_words)
+    starts = any(w and w.casefold() in before for w in from_words)
+    return (None, found[0][2]) if ends and not starts else (found[0][2], None)
+
+
+def coerce(spec, value, year=None):
     """A value the model wrote as text -> (the value in the field's type, its precision or None), or None when
-    it does not fit. Dates are stored to the day unless a time was written."""
+    it does not fit. Dates are stored to the day unless a time was written; a date with its month by name is read
+    too (dates_in), with `year` for one written without its year."""
     if value is None:
         return None
     s = str(value).strip()
@@ -327,6 +394,9 @@ def coerce(spec, value):
     if t == "time":
         m = _DATE.match(s)
         if not m:
+            found = dates_in(s, year)   # the whole value is one written date ("Oct 03, 2026"), nothing else in it
+            if len(found) == 1 and not re.search(r"[^\W_]", s[:found[0][0]] + s[found[0][1]:]):
+                return (f"{found[0][2]}T00:00:00Z", "day")
             return None
         y, mo, d, hh, mm, ss = m.groups()
         if not (1 <= int(mo) <= 12 and 1 <= int(d) <= 31):

@@ -175,6 +175,16 @@ class StandIn:
             lk("KNOWS_ABOUT", "r6", "r7", "Sam Lee is the person to ask about refunds"),         # an end that was dropped
         ]}
 
+    def ekg_table_shape(self, prompt, schema):
+        """Step 1 of a table's mapping, from the stand-in's whole mapping (ekg_table_map): its shape, and the record
+        type each link column names. Step 2 is answered by ekg_table_map itself (code takes its fields and links)."""
+        full = self.ekg_table_map(prompt, schema)
+        if not isinstance(full, dict) or "error" in full or "_usage" in full:
+            return full
+        cols = [{"column": x["column"], "type": x["other_type"]} for x in full.get("links") or []
+                if isinstance(x, dict) and x.get("other_type")]
+        return {**full, "columns": cols}
+
     def ekg_table_map(self, prompt, schema):
         if '"Manager"' not in prompt:  # the big table: name, email, team
             return {"row_type": "Person", "name_column": "c1", "key_column": "c2", "reason": "a staff list",
@@ -429,10 +439,13 @@ def table_checks(check):
     L = collections.defaultdict(set)
     for lk in links:
         L[lk["type"]].add((_name(by_id[lk["a"]]), _name(by_id[lk["b"]])))
-    check("table: one model call for the whole table, and none per row (a tables-only file is not read as prose)",
-          [n for n, _ in model.calls] == ["ekg_table_map"] and rep["kinds"]["doc_facts"]["to_ask"] == 0)
-    check("table: the prompt shows the header, sample rows and the schema, not a question per row",
-          "c1 = \"Name\"" in model.calls[0][1] and "7 rows" in model.calls[0][1] and "- MEMBER_OF:" in model.calls[0][1])
+    check("table: two small model calls for the whole table (its shape, then its columns), none per row (a tables-only "
+          "file is not read as prose)",
+          [n for n, _ in model.calls] == ["ekg_table_shape", "ekg_table_map"] and rep["kinds"]["doc_facts"]["to_ask"] == 0)
+    check("table: step 1 shows the header, sample rows and the record types; step 2 the links code found between the "
+          "table's types (MEMBER_OF), not a question per row",
+          "c1 = \"Name\"" in model.calls[0][1] and "7 rows" in model.calls[0][1] and "- Person:" in model.calls[0][1]
+          and "- MEMBER_OF:" in model.calls[1][1] and "- MEMBER_OF:" not in model.calls[0][1])
     check("table: a Person for every row with a name; the existing Bob is reused, not duplicated",
           set(people) == {"Alice Chen", "Bob Kumar", "Carla Diaz", "Dev Patel", "Erin Shaw", "Femi Ade"}
           and people["Bob Kumar"]["props"]["source_tool"] == "hr" and c.get("table rows written") == 6 and c.get("table rows read") == 7)
@@ -479,8 +492,8 @@ def table_checks(check):
     recs, links, by_id = written(out, tmp)
     kinds = collections.Counter(r["type"] for r in recs)
     lt = collections.Counter(lk["type"] for lk in links)
-    check(f"table: a 50,000-row table makes exactly one model call ({took:.0f}s to write it all in code)",
-          len(model.calls) == 1 and rep["calls"]["made"] == 1)
+    check(f"table: a 50,000-row table makes exactly two model calls, shape and columns ({took:.0f}s to write it all in code)",
+          len(model.calls) == 2 and rep["calls"]["made"] == 2)
     check("table: all 50,000 rows become Person records with MEMBER_OF to 40 teams",
           kinds["Person"] == 50_000 and kinds["Group"] == 40 and lt["MEMBER_OF"] == 50_000
           and rep["written"]["documents_and_tables"].get("table rows written") == 50_000)
@@ -523,7 +536,9 @@ def concurrency_checks(check):
     third = StandIn()
     rep3, _, _ = run_fill(g, third, ["table_map", "doc_facts"], window=9_000, concurrency=16, out=out)
     check("concurrency: with the ledger gone, responses.jsonl answers every prompt (a stopped run pays nothing twice)",
-          not third.calls and rep3["calls"]["answered_from_responses"] == rep["calls"]["made"] + rep["calls"]["answered_from_responses"])
+          not third.calls and rep3["calls"]["answered_from_responses"] + 2 * rep3["kinds"]["table_map"]["mappings_from_cache"]
+          == rep["calls"]["made"] + rep["calls"]["answered_from_responses"]
+          and rep3["kinds"]["table_map"]["mappings_from_cache"] >= 1)
 
     async def same_prompt():
         with tempfile.TemporaryDirectory() as d:

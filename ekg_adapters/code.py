@@ -10,7 +10,8 @@ of every language there is a grammar for are parsed by symbols.py: types, functi
 CodeSymbols DEFINED_IN their file, with IMPORTS, EXTENDS and CALLS between symbols of the same repository.
 The code host's standard path maps in the repository are read too: a labeler config (label -> path globs: the
 folders and files it names HAS_LABEL that label) and a code-owners file (CodeOwnersRule, MATCHES, OWNED_BY).
-A commit or pull request is ABOUT the deepest folder holding every file it changed.
+Every File, also one only history names, is IN its Folder, so the changes under a folder are found by walking
+Folder <-IN- (Folder <-IN-)* File <-CHANGES- Commit / PullRequest.
 """
 
 import json
@@ -127,8 +128,15 @@ def map_code(g: Graph, d: Path):
     for path, abs_path in listing:  # a checkout: the config files are read from it
         if abs_path is not None and (path in CODEOWNERS_PATHS or path.startswith(".github/")):
             texts_all[path] = _read(abs_path)
+    # a file that history names but the snapshot no longer holds (deleted, moved) is IN its folder too, so a change to
+    # it is found by walking Folder <-IN- Folder ... <-IN- File <-CHANGES- Commit / PullRequest like any other
+    listed, in_tree = {p for p, _ in listing}, len(folders)
+    for path, f in list(files.items()):
+        if path not in listed and "/" in path:
+            g.link("IN", f, folder(path.rsplit("/", 1)[0]), "field")
+            g.notes["code: files no longer in the snapshot, put IN their folder"] += 1
+    g.notes["code: folders only history names (no longer in the snapshot)"] = len(folders) - in_tree
     _path_configs(g, repo, scope, files, folders, {p: t for p, t in texts_all.items() if t})
-    _change_folders(g, files, folders)
 
 
 # where the code hosts look for a code-owners file (GitHub and GitLab: the root, .github/ or .gitlab/, docs/)
@@ -193,7 +201,7 @@ def _path_configs(g, repo, scope, files, folders, texts):
       - a code-owners file: one CodeOwnersRule per line, MATCHES the folders and files its pattern names, and each
         of those is OWNED_BY the accounts it names when this line is the last one matching it (source codeowners)."""
     import yaml
-    label = g.ctx.get("code_labels")
+    label = g.ctx.get("code_label")
     configs = set()
     for path, text in texts.items():
         if path.startswith(".github/workflows/") and "actions/labeler" in text:
@@ -225,8 +233,12 @@ def _path_configs(g, repo, scope, files, folders, texts):
                 neg = glob.startswith("!")
                 fo, fi = _targets(glob.lstrip("!"), files, folders)
                 (drop if neg else keep).update(r["props"]["_key"] for r in fo + fi)
+            target = label(name)  # the host's own label, its name compared without regard to case
+            if target is None:   # the config names a label the code host does not have: counted, never made
+                g.notes["code: labeler config labels the code host does not have (not linked)"] += 1
+                continue
             for key in sorted(keep - drop):
-                g.link("HAS_LABEL", g.records[key], label(str(name)), "field", rule_id=f"labeler:{path}")
+                g.link("HAS_LABEL", g.records[key], target, "field", rule_id=f"labeler:{path}")
                 g.notes["code: folders and files carrying a label by the labeler config"] += 1
     for path in CODEOWNERS_PATHS:
         if path in texts:
@@ -261,29 +273,6 @@ def _codeowners(g, repo, scope, path, text, files, folders):
                 g.notes["code: code owners not linked (a team, an address or an unknown login)"] += 1
                 continue
             g.link("OWNED_BY", g.records[key], acct, "field", source="codeowners", rule_id=rule["props"]["native_id"])
-
-
-def _change_folders(g, files, folders):
-    """A commit or pull request is ABOUT the folder its changes are confined to: the deepest folder in the tree that
-    holds every file it changed (none when they share only the repository root)."""
-    path_of = {f["id"]: p for p, f in files.items()}
-    changed = {}
-    for lk, ka, _ in g.links.values():
-        if lk["type"] == "CHANGES" and lk["b"] in path_of:
-            changed.setdefault(ka, [lk["props"].get("at"), []])[1].append(path_of[lk["b"]])
-    for ka, (at, paths) in changed.items():
-        parts = [p.split("/")[:-1] for p in paths]
-        common = []
-        for level in zip(*parts):
-            if len(set(level)) != 1:
-                break
-            common.append(level[0])
-        while common and "/".join(common) not in folders:  # a folder no longer in the snapshot: its nearest parent
-            common.pop()
-        if common:
-            g.link("ABOUT", g.records[ka], folders["/".join(common)], "inferred", 1.0, derived=True,
-                   rule_id="derive:change_confined_to_folder", kind="changed_folder", valid_from=at)
-            g.notes["code: changes ABOUT the folder they are confined to"] += 1
 
 
 def _doc(g, f, rid, path, source, scope, note):

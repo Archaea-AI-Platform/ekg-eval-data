@@ -54,10 +54,37 @@ ASK = ("List every record and every link this text states, using only the record
        "an area ...), as the listed link type whose "
        "description says that, in the direction its description gives. from and to are refs of records in your "
        "list. quote and source: the words that state the link itself, not just the two names near each other.\n"
-       "- Report only what the text states. Skip navigation, boilerplate, and examples that only illustrate.\n"
+       "- A text that speaks for a team (\"we\", \"our team\") states facts about the team the document is by, as its "
+       "title or first heading names it: list that team by that name, and link what the text says the team owns, runs, "
+       "decides or is the contact for, by the link type whose description says so.\n"
+       "{worth}\n"
+       "- Report only what the text states. Skip navigation, licence and copyright boilerplate, and sample output that "
+       "only illustrates; a passage that shows how to do something (a command and what it does) is a how-to, not an "
+       "illustration.\n"
        "- There is no limit on how many: report all of them. Empty lists are right when nothing qualifies.\n"
        'Reply with one JSON object: {{"records": [{{"ref", "type", "name", "statement", "fields": [{{"field", "value"}}], '
        '"quote", "source"}}], "links": [{{"type", "from", "to", "fields": [{{"field", "value"}}], "quote", "source"}}]}}')
+
+
+def worth_keeping(catalog) -> str:
+    """What counts as worth keeping in prose, from the registry: each type a text may state (Catalog.stated) with the
+    first sentence of the registry's description, and the meaning of each of its kinds where the registry lists
+    them (Knowledge: how_to, rationale, gotcha ...). Not one word of it is written here."""
+    from .extract_schema import first_sentence
+    rows = []
+    for t in catalog.stated:
+        rt = catalog.reg.record(t)
+        about = first_sentence(rt.about or rt.description or "").rstrip(";.")
+        kind = rt.fields.get("kind")
+        line = f"  {t}: {about}" + (f". Its kinds: {kind.about}" if kind is not None and kind.enum and kind.about else "")
+        rows.append(line)
+    return ("- WORTH KEEPING: explanatory prose holds these as much as numbered lists do. Every statement of one of "
+            "the types below is an item, wherever it is written (a paragraph, a list item, a note under a heading), "
+            "even when nothing numbers it or calls it a rule or a requirement:\n" + "\n".join(rows))
+
+
+def _ask(catalog):
+    return ASK.format(catalog=catalog_text(catalog), worth=worth_keeping(catalog))
 
 
 def _header():
@@ -73,7 +100,7 @@ def catalog_text(catalog):
 
 def overhead(catalog) -> int:
     """Characters of a doc_facts prompt that are not the document: instructions, the schema, the reply format."""
-    return len(_header()) + len(ASK.format(catalog=catalog_text(catalog))) + len(json.dumps(schema(catalog, ["P1"]))) + 400
+    return len(_header()) + len(_ask(catalog)) + len(json.dumps(schema(catalog, ["P1"]))) + 400
 
 
 def build(v):
@@ -98,7 +125,7 @@ def build(v):
 
 def prompt(t: Task, catalog, sources=None):
     from .fill import _text_block
-    return "\n".join([_header(), ""] + _text_block(t, sources) + ["", ASK.format(catalog=catalog_text(catalog))])
+    return "\n".join([_header(), ""] + _text_block(t, sources) + ["", _ask(catalog)])
 
 
 def schema(catalog, labels):
@@ -196,8 +223,9 @@ def paragraphs(item):
 
 def _covered(paras, quotes):
     """Which paragraphs an accepted quote sits in or spans into: each quote is found in the passage's text (as
-    quotes are compared, fill._norm) and every paragraph its span overlaps is covered."""
-    from .fill import _norm
+    quotes are compared, fill._norm) and every paragraph its span overlaps is covered. A quote that joins
+    several sentences (fill.quote_parts) covers the paragraph of each of them."""
+    from .fill import _LABEL, _JOINS, _norm
     hit = set()
     for joined in ("", "-"):     # a line-end hyphen joined, or kept: as find_quote compares
         normed = [_norm(p, joined) for p in paras]
@@ -206,12 +234,16 @@ def _covered(paras, quotes):
             starts.append(at)
             at += len(p) + 1
         text = " ".join(normed)
-        for q in quotes:
-            q = _norm(q, joined).strip(" \"'“”‘’…").rstrip(".")
-            i = text.find(q) if len(q) >= 3 else -1
-            if i < 0:
-                continue
-            hit |= {k for k, s in enumerate(starts) if s < i + len(q) and i < s + len(normed[k])}
+        clean = lambda s: _norm(s, joined).strip(" \"'“”‘’…").rstrip(".")
+        for quote in quotes:
+            quote = _LABEL.sub("", quote or "")
+            whole = clean(quote)
+            spans = [whole] if len(whole) >= 3 and whole in text else \
+                [p for p in (clean(x) for x in _JOINS.split(quote) if x.strip()) if len(p) >= 3]
+            for q in spans:
+                i = text.find(q)
+                if i >= 0:
+                    hit |= {k for k, s in enumerate(starts) if s < i + len(q) and i < s + len(normed[k])}
     return hit
 
 
@@ -231,13 +263,15 @@ def uncovered(sources, records, links):
 
 
 FOLLOW_UP = ("NOT COVERED YET: an earlier reading of this document listed nothing from the passages below. Read them "
-             "again and list every record and link they state, by the rules below. If they hold nothing to keep (a "
-             "heading, a page number, navigation, an illustration), reply with empty lists.")
+             "again and list every record and link they state, by the rules below. A paragraph that explains how "
+             "something works or is done, why it is so, what to watch out for, what is recommended or what was "
+             "decided is worth keeping (see WORTH KEEPING), whether or not it is numbered. Only when they hold nothing "
+             "to keep (a heading, a page number, navigation, sample output) reply with empty lists.")
 
 
 def follow_up_prompt(t: Task, catalog, sources):
     from .fill import _text_block
-    return "\n".join([_header(), ""] + _text_block(t, sources) + ["", FOLLOW_UP, "", ASK.format(catalog=catalog_text(catalog))])
+    return "\n".join([_header(), ""] + _text_block(t, sources) + ["", FOLLOW_UP, "", _ask(catalog)])
 
 
 async def settle(t: Task, ask, catalog):
@@ -245,17 +279,18 @@ async def settle(t: Task, ask, catalog):
     (or the paragraphs of a long passage) no accepted quote sits in, in smaller follow-up calls, at most
     COVERAGE_ROUNDS times. What still yields nothing is recorded as read, nothing kept. Returns the ledger entry."""
     from . import fill_budget
-    from .fill import _error, ask_split
+    from .fill import _error, ask_split, unanswered
     make_schema = lambda labels: schema(catalog, labels)
-    got = await ask_split(ask, t.sources, lambda ss: prompt(t, catalog, ss), "ekg_doc_facts", make_schema)
-    if isinstance(got, dict):
-        return {"status": "error", "reason": _error(got)}
+    got, failed_first = await ask_split(ask, t.sources, lambda ss: prompt(t, catalog, ss), "ekg_doc_facts", make_schema)
+    if not got:
+        return {"status": "error", "reason": _error(failed_first[0][1])}
     records, links, dropped, fixed = [], [], collections.Counter(), collections.Counter()
     part = _check(got, catalog, 0, records, links, dropped, fixed)
     rounds = []
     room = max(t.write.get("room") or sum(len(s.text) for s in t.sources), 2000) // 2   # a follow-up is a smaller window
+    unread = {s.label for ss, _ in failed_first for s in ss}   # passages no answer covers: not re-read as "nothing kept"
     for n in range(1, COVERAGE_ROUNDS + 1):
-        left = uncovered(t.sources, records, links)
+        left = [(s, ps) for s, ps in uncovered(t.sources, records, links) if s.label not in unread]
         if not left:
             break
         again = [Item(s.label, s.id, f"{s.title} (not covered yet)", "\n\n".join(ps), s.type) for s, ps in left]
@@ -263,20 +298,23 @@ async def settle(t: Task, ask, catalog):
         before = len(records) + len(links)
         answers = await asyncio.gather(*[ask_split(ask, w, lambda ss: follow_up_prompt(t, catalog, ss), "ekg_doc_facts", make_schema)
                                          for w in windows])
-        failed = sum(1 for a in answers if isinstance(a, dict))
-        for a in answers:
-            if not isinstance(a, dict):
-                part = _check(a, catalog, part, records, links, dropped, fixed)
+        failed = sum(len(f) for _, f in answers)
+        for a, _ in answers:
+            part = _check(a, catalog, part, records, links, dropped, fixed)
+        kept = len(records) + len(links) - before
         rounds.append({"round": n, "passages": len(again), "paragraphs": sum(len(ps) for _, ps in left),
                        "chars": sum(len(it.text) for it in again), "calls": len(windows), "calls_failed": failed,
-                       "items_kept": len(records) + len(links) - before})
-    left = uncovered(t.sources, records, links)
+                       "items_kept": kept})
+        if kept == 0:   # the next round would send the very same passages again: its answer is this one's
+            break
+    left = [(s, ps) for s, ps in uncovered(t.sources, records, links) if s.label not in unread]
     with_items = {x["source_id"] + "|" + x["label"] for x in records + links}
     coverage = {"passages": len(t.sources), "passages_with_items": sum(1 for s in t.sources if f"{s.id}|{s.label}" in with_items),
                 "paragraphs": sum(len(paragraphs(s)) for s in t.sources), "paragraphs_read_nothing_kept": sum(len(ps) for _, ps in left),
-                "passages_read_nothing_kept": [s.label for s in t.sources if f"{s.id}|{s.label}" not in with_items],
+                "passages_read_nothing_kept": [s.label for s in t.sources if f"{s.id}|{s.label}" not in with_items and s.label not in unread],
+                "passages_unanswered": sorted(unread, key=lambda s: (len(s), s)),
                 "chars": sum(len(s.text) for s in t.sources), "items": len(records) + len(links), "rounds": rounds}
-    entry = {"dropped": dict(dropped), "coverage": coverage}
+    entry = {"dropped": dict(dropped), "coverage": coverage, **unanswered(failed_first)}
     if fixed:
         entry["fixed"] = dict(fixed)
     if not records:
@@ -432,6 +470,8 @@ def apply(w, t: Task, e):
             if item_key in w.stated_items:
                 found = [w.stated_items[item_key]]
                 c[f"{rtype}: the same numbered item again in its document, the record made for it"] += 1
+        if not found and named and rtype not in cat.stated:   # "payments-platform": the one "acme-commerce/payments-platform"
+            found = v.by_name_tail(x["name"], {rtype})
         if not found and named and rtype not in cat.stated and cat.name_field(rtype) == PERSONAL_NAME:
             found = v.by_name_prefix(x["name"], {rtype})   # "Lionel" -> the one "Lionel eng-orders" whose team is eng-orders
         bare = named and rtype not in cat.stated and thin(cat, rtype, x)
