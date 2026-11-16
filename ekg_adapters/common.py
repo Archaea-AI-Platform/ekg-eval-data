@@ -153,6 +153,36 @@ def repo_commits(d, shas) -> list:
     return rows
 
 
+def commit_changes(d, shas) -> dict:
+    """sha -> [(old mode, new mode, old blob, new blob, status letter, path), ...]: each commit's file changes against
+    its first parent,
+    read from repo.git's trees alone (blob ids, no contents: a blobless clone has them, nothing is fetched), with
+    rename detection off (it would need the contents). A merge commit, and a commit the clone lacks, is absent."""
+    import os
+    import subprocess
+    repo = d / "git" / "repo.git"
+    shas = list(shas)
+    if not repo.is_dir() or not shas:
+        return {}
+    try:
+        text = subprocess.run(["git", "--git-dir", str(repo), *GIT_READ, "log", "--no-walk", "--stdin", "--no-renames",
+                               "--raw", "-r", "--no-abbrev", "--format=@%H"], input="\n".join(shas).encode() + b"\n",
+                              capture_output=True, env={**os.environ, "GIT_NO_LAZY_FETCH": "1"}, timeout=1800,
+                              check=True).stdout.decode("utf-8", "replace")
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    out, cur = {}, None
+    for line in text.split("\n"):
+        if line.startswith("@"):
+            cur = line[1:].strip()
+        elif line.startswith(":") and cur and "\t" in line:
+            head, path = line.split("\t", 1)
+            f = head.split()  # :old_mode new_mode old_blob new_blob status
+            if len(f) >= 5:
+                out.setdefault(cur, []).append((f[0].lstrip(":"), f[1], f[2], f[3], f[4][:1], path))
+    return out
+
+
 def release_branch_commits(d, skip, default, pattern, since=None) -> list:
     """Commits on the release branches (the branch names `pattern` fully matches, e.g. 4.3 or release-1.18) that
     the default branch does not have (cherry-picks, version bumps), each with _branch set to the first release

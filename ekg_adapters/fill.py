@@ -41,7 +41,7 @@ from . import common, fill_budget, fill_docs, llm
 from .common import Graph
 from .fill_tasks import BUILDERS, DEFAULT_KINDS, GUIDELINE_STRENGTH, KNOWLEDGE_KINDS, Task, View, _ordered
 
-PROMPT_VERSION = "fill-v4"  # a verdict from another version is asked again (responses.jsonl still answers an unchanged prompt)
+PROMPT_VERSION = "fill-v5"  # a verdict from another version is asked again (responses.jsonl still answers an unchanged prompt)
 
 # How sure a written fact is, by how it was established. These are PRIORS, set by judgement: replace each with
 # the accuracy measured for its row on the evaluation set. The model's own opinion of itself is never used.
@@ -50,6 +50,8 @@ CONFIDENCE = {
     "one": 0.85,      # the quote is in the text, and each name resolved to exactly one existing record
     "new": 0.70,      # the quote is in the text, and a record had to be created for what it names or states
     "chosen": 0.60,   # the quote is in the text, and the model chose among several candidate records
+    "reference": 0.80,  # code found another record's id written in a record's own quoted words (no model call);
+                        # the registry's figure for a key read from text (MENTIONS: about 0.8 for a ticket key)
 }
 BUDGET = fill_budget.sizes()   # what one prompt may carry; run() replaces it with the served model's
 CLIPPED = collections.Counter()  # judge prompts larger than a whole window, by kind (their longest texts shortened)
@@ -327,6 +329,9 @@ class Responses:
     def __init__(self, path: Path, model: str, concurrency: int | None = None):
         self.path, self.model, self.seen, self.hits, self.calls = path, model, {}, 0, 0
         self.prompt_chars, self.flying = 0, {}
+        self.usage_of = {}   # key -> the token usage of the call that answered it (when the provider reported it)
+        # tokens of the calls this run made, by step (llm.ask: usage as the provider reported it)
+        self.usage = collections.defaultdict(collections.Counter)
         # calls in flight, across every task: a task may make several at once (halves, follow-up readings)
         self.concurrency, self._gate = concurrency, None
         if path.exists():
@@ -334,6 +339,8 @@ class Responses:
                 try:
                     r = json.loads(line)
                     self.seen[r["key"]] = r["response"]
+                    if r.get("usage"):
+                        self.usage_of[r["key"]] = r["usage"]
                 except (json.JSONDecodeError, KeyError, TypeError):  # a line cut off by the stop itself
                     continue
         self.file = open(path, "a", encoding="utf-8")
@@ -341,11 +348,23 @@ class Responses:
     def key(self, prompt, name):
         return hashlib.sha256(f"{self.model}\n{name}\n{prompt}".encode()).hexdigest()[:32]
 
+    def _answer(self, k):
+        res = self.seen[k]
+        return {**res, "_usage": self.usage_of[k]} if k in self.usage_of and isinstance(res, dict) else res
+
+    def usage_report(self):
+        """Tokens of the calls this run made, by step and in total, as the provider reported them."""
+        steps = {s: dict(c) for s, c in sorted(self.usage.items())}
+        total = collections.Counter()
+        for c in self.usage.values():
+            total.update(c)
+        return {"by_step": steps, "total": dict(total)}
+
     async def ask(self, task_id, prompt, name, schema, **_ignored):
         k = self.key(prompt, name)
         if k in self.seen:
             self.hits += 1
-            return self.seen[k]
+            return self._answer(k)
         if k in self.flying:  # the same prompt asked by another task right now: one call, both get the answer
             self.hits += 1
             return await asyncio.shield(self.flying[k])
@@ -361,16 +380,33 @@ class Responses:
                 res = await llm.ask(prompt, name, schema)
         except Exception as e:  # the client returns errors as values; anything it raises is one too
             res = {"error": f"{type(e).__name__}: {e}"}
+        except asyncio.CancelledError:  # given up by its caller (a mapping past its time): whoever waits on it too
+            fut.set_result({"error": "the call was given up"})
+            raise
         finally:
             self.flying.pop(k, None)
         self.calls += 1
         self.prompt_chars += len(prompt)
+        usage = res.get("_usage") if isinstance(res, dict) else None
+        step = self.usage[name]
+        step["calls"] += 1
+        if usage:
+            step["calls_with_usage"] += 1
+            for u, n in usage.items():
+                if isinstance(n, (int, float)) and u != "attempts":
+                    step[u] += n
         if isinstance(res, dict) and "error" not in res:
-            self.seen[k] = res
+            answer = {x: y for x, y in res.items() if x != "_usage"}
+            self.seen[k] = answer
+            if usage:
+                self.usage_of[k] = usage
             self.file.write(json.dumps({"key": k, "task": task_id, "step": name, "model": self.model,
                                         "at": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                                        "prompt": prompt, "response": res}, ensure_ascii=False) + "\n")
+                                        "prompt": prompt, "response": answer, **({"usage": usage} if usage else {})},
+                                       ensure_ascii=False) + "\n")
             self.file.flush()
+        else:
+            step["errors"] += 1
         fut.set_result(res)
         return res
 
@@ -478,6 +514,10 @@ class Writer:
         self._view, self._links = view, links
         self.pending = []                      # entity_choice tasks the document pass could not settle in code
         self.facts = collections.Counter()     # what the document and table passes did, and why not, by reason
+        # run() writes every table's rows before any table's links (a commit log's pull request is then the one
+        # the merge log made); extract_tables.apply leaves each table's link pass here while this is set
+        self.defer_table_links, self.table_links = False, []
+        self.stated_items = {}   # (document, type, the item's own id) -> the record made for that numbered item
 
     @property
     def v(self) -> View:
@@ -721,6 +761,30 @@ def possible_duplicates(w, limit=50):
             "examples": [{"value": val, "kind": f, "records": sorted(map(name, ks))} for f, val, ks in shared[:limit]]}
 
 
+def schema_sizes(catalog):
+    """The schema section of the document and table prompts: its size without and with the registry's
+    descriptions, and which descriptions the budget let in (extract_schema.Catalog.schema_text)."""
+    budget = getattr(catalog, "budget", None) or BUDGET
+    return {which: catalog.schema_text(which, budget.schema_chars)[1] for which in ("documents", "tables")}
+
+
+def table_acceptance(entries):
+    """One row per table: what its mapping did (accepted, mapped in part and read as text too, rejected, error),
+    the row type, the links it maps and why, so that runs can be compared table by table."""
+    out = []
+    for t, e in entries:
+        m = e.get("mapping") or {}
+        status = e.get("status", "not asked")
+        if status == "accepted" and m.get("also_text"):
+            status = "accepted, also read as text"
+        out.append({"table": t.question, "rows": t.write.get("rows"), "status": status, "row_type": m.get("row_type"),
+                    "links": sorted({l["link"] for l in m.get("links", [])}),
+                    **({"also_text": m["also_text"]} if m.get("also_text") else {}),
+                    "reason": (e.get("reason") or "")[:200],
+                    **({"completion_tokens": e["usage"].get("completion_tokens")} if isinstance(e.get("usage"), dict) else {})})
+    return out
+
+
 def coverage(answered):
     """Per document: how much of what was read yielded an accepted item. Under-reading shows here without an
     answer key: passages with items / passages read, items per 1,000 characters, paragraphs read twice more
@@ -769,6 +833,13 @@ SCHEMA_GAPS = [
     "arrive as Pieces whose heading is the section path.",
     "Document extraction quality (kept ratio) has no field on File or Document: it is read from the graph's "
     "report.json (doc_quality) and multiplied into confidence.",
+    "No link joins two Requirements other than SUPERSEDES: DEPENDS_ON and LINKS_TO do not start at a Requirement, "
+    "and ABOUT, which starts at any type, does not end at one. A requirement citing another one by id is written as the citing requirement's passage "
+    "(Piece) LINKS_TO the cited Requirement (LINKS_TO ends at any type); a Requirement -> Requirement reference "
+    "link would carry it directly (extract_facts.link_cited_ids picks one up as soon as the registry has it).",
+    "No link with a count joins a Person or Account to a Service, Repository or Folder (KNOWS_ABOUT has an order, "
+    "EDITED_BY a count but starts at a File or Piece): a table of commit counts per person and module cannot store "
+    "its counts. Such a table's mapping names the gap (schema_gap) and the table is read as text as well.",
 ]
 
 
@@ -852,6 +923,10 @@ def run(graph: Path, query_master: Path, out: Path | None = None, kinds=None, li
     if any(k in built for k in ("doc_facts", "table_map")):
         report["schema_used"] = v.catalog().summary()
         report["schema_gaps"] = SCHEMA_GAPS
+        report["schema_descriptions"] = schema_sizes(v.catalog())
+        for which, row in report["schema_descriptions"].items():
+            log(f"  schema for {which}: {row['chars_without_descriptions']:,} characters without the registry's descriptions, "
+                f"{row['chars']:,} with {row['detail'] or 'none'} (budget {row['budget_chars']:,})")
     totals()
 
     if mode == "dry":
@@ -975,18 +1050,34 @@ def run(graph: Path, query_master: Path, out: Path | None = None, kinds=None, li
         # name. A table whose mapping was not accepted is then read as text: the reading windows are built again.
         if "table_map" in built:
             # the table that identifies its records best (name, key, ids, emails ...) is written first, so the
-            # rows of the other tables resolve to the records it made instead of making their own
+            # rows of the other tables resolve to the records it made instead of making their own; every table's
+            # rows are written before any table's links, so that a link cell finds a row another table made
+            types_before = {t for t, rs in v.by_type.items() if rs}
+            w.defer_table_links = True
             ask_and_apply(built["table_map"][0], "Tables",
                           apply_first=lambda e: ((e or {}).get("mapping") or {}).get("identifying", 0))
-            mapped = {u for t in built["table_map"][0] if (seen.get(t.id) or {}).get("status") == "accepted"
+            w.defer_table_links = False
+            for links_pass in w.table_links:
+                links_pass()
+            w.table_links = []
+            entries = [(t, seen.get(t.id) or {}) for t in built["table_map"][0]]
+            mapped = {u for t, e in entries if e.get("status") == "accepted" and not (e.get("mapping") or {}).get("also_text")
                       for u in t.write["units"]}
-            if mapped != v.claimed:
-                left = sum(1 for t in built["table_map"][0] if (seen.get(t.id) or {}).get("status") != "accepted")
+            report["kinds"]["table_map"]["acceptance"] = table_acceptance(entries)
+            new_types = sorted({t for t, rs in v.by_type.items() if rs} - types_before)
+            if new_types:   # the documents may name what the tables made (a pull request, a commit, a file)
+                v._catalog = None
+                v.overhead.pop("doc_facts", None)
+                report["kinds"]["table_map"]["types_the_tables_added_for_the_documents"] = new_types
+            if mapped != v.claimed or new_types:
+                left = sum(1 for _, e in entries if e.get("status") != "accepted")
+                also = sum(1 for _, e in entries if e.get("status") == "accepted" and (e.get("mapping") or {}).get("also_text"))
                 v.claimed = mapped
-                log(f"  {left:,} tables not mapped: read as text with their documents")
+                log(f"  {left:,} tables not mapped and {also:,} mapped only in part: read as text with their documents")
                 for k in [k for k in built if k in READING_KINDS]:
                     build_kind(k)
                     report["kinds"][k]["tables_read_as_text_after_their_mapping_was_not_accepted"] = left
+                    report["kinds"][k]["tables_mapped_in_part_and_read_as_text_too"] = also
                 totals()
         ask_and_apply([t for k in built if k != "table_map" for t in built[k][0]], "Gaps, conversations and documents")
         if w.pending:  # names that matched several records: the model chooses among them, as for any other gap
@@ -996,10 +1087,17 @@ def run(graph: Path, query_master: Path, out: Path | None = None, kinds=None, li
             ask_and_apply(choices, "Names with several matches")
             for t in choices:
                 extract_facts.not_chosen(w, t)
+        if "doc_facts" in built or "table_map" in built:
+            # last, in code only: a record that cites another record's id (one requirement naming another, in any
+            # document) is linked to it, now that every document has been read
+            from . import extract_facts
+            report["id_references"] = extract_facts.link_cited_ids(w)
+            log(f"  id references: {json.dumps(report['id_references'], ensure_ascii=False)[:400]}")
     finally:
         responses.close()
     report["calls"] = {"made": responses.calls, "answered_from_responses": responses.hits,
-                       "prompt_chars_sent": responses.prompt_chars, "concurrency": concurrency}
+                       "prompt_chars_sent": responses.prompt_chars, "concurrency": concurrency,
+                       "wall_seconds": round(time.time() - started), "usage": responses.usage_report()}
     for k in report["kinds"]:
         report["kinds"][k].update(dict(stats[k]), why_not=dict(reasons[k].most_common(10)))
     if "doc_facts" in built:

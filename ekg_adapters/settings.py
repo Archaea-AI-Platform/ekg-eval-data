@@ -35,6 +35,8 @@ DEFAULTS = {
     # a regex whose group 1 is the ticket key in a tracker notice's subject; None: the first known ticket key
     "tracker_notice_subject": None,
     "ci_subject": r"^\[(GH|CI|BUILD)\]|workflow run|build (failed|fixed|is back)|\bjenkins\b",  # code-host notices that are CI
+    # a person's announcement on a mailing list (a regex on its subject): one naming a release's version ANNOUNCES it
+    "announce_subject": r"^\s*\[(ANNOUNCE|ANNOUNCEMENT|ANN)\]",
     "issue_tracker": None,        # "github" when tickets are GitHub issues: #N in text may name an issue
     "infer_people": "auto",       # people from commit and mail authorship: "auto" = only when there is no directory
     "public": True,               # the sources are public (granted to the Public principal)

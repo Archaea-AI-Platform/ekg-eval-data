@@ -40,11 +40,29 @@ ORIGIN_RELATION = "RAISED_IN"
 ORIGIN_ORDER = ("EXTRACTED_FROM", "RAISED_IN", "MADE_IN", "DOCUMENTED_IN")  # the first the registry allows is written
 SOURCE_WORDS = re.compile(r"\b(csv|catalog|directory|hr|crm|adrs?|prds?|runbooks?|style guides?|notes)\b", re.I)
 _DATE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2}))?Z?)?$")
+# the registry's descriptions a prompt's schema section can carry, most needed first (Catalog.schema_text): what
+# each record type is, what each link means and which way it is stored, what a link's fields hold, what a field holds
+DETAIL_LAYERS = ("types", "links", "link_fields", "fields")
+# which layers each prompt carries. A document prompt fills fields from the text, so it describes them all. A table
+# prompt maps columns to types, links and fields by name: it describes types and links (what each means, which way
+# it is stored). With every layer (148,510 characters on the ACME graph, 35,000 tokens) the first real run thought
+# for 1,200 to 11,000 tokens per mapping, 4 of 15 over 8,000; types and links alone are 77,700 characters.
+LAYERS_FOR = {"documents": DETAIL_LAYERS, "tables": ("types", "links")}
+LINK_HEAD = ("LINK TYPES (from -> to). Use only these, only in this direction, only between these types. Each one's "
+             "description says what \"A LINK B\" means: A is the record on the left.")
+
+
+def first_sentence(text) -> str:
+    """A description's first sentence (up to the first '.' or ';' followed by a space), else the whole."""
+    m = re.match(r"(.+?[.;])(?=\s|$)", text or "", re.S)
+    return (m.group(1) if m else (text or "")).strip()
 
 
 class Catalog:
     def __init__(self, reg, present_types=()):
         self.reg = reg
+        self._schema_cache = {}
+        self.budget = None   # fill_budget.Budget the prompts' schema sections are sized by (set by View.catalog)
         usable = {n: t for n, t in reg.records.items() if not set(t.pillars) <= SKIP_PILLARS}
         self.origin_links = [lk for lk in reg.links.values() if lk.relation == ORIGIN_RELATION and not lk.internal
                              and set(lk.to_types) & set(DOCUMENT_TYPES)]
@@ -56,13 +74,19 @@ class Catalog:
         self.resolvable = sorted(n for n in usable if n in set(present_types) and n not in self.creatable
                                  and names_of(usable[n]))
         known = self.creatable + self.resolvable
+        stated_named = set(self.stated)
         self.links = {}
         for name, lk in sorted(reg.links.items()):
             if lk.internal or lk.relation == ORIGIN_RELATION or set(lk.pillars) <= SKIP_PILLARS:
                 continue
-            a = [t for t in known if any(reg.is_a(t, x) for x in lk.from_types if x != "any")]
-            b = [t for t in known if any(reg.is_a(t, x) for x in lk.to_types if x != "any")]
-            if a and b and set(self.creatable) & (set(lk.from_types) | set(lk.to_types)):
+            # an `any` end is a catch-all: it counts for the types a document states (a requirement ABOUT the service
+            # it is about), never for every type, which would offer each link between everything
+            a = [t for t in known if any(reg.is_a(t, x) for x in lk.from_types if x != "any")
+                 or ("any" in lk.from_types and t in stated_named)]
+            b = [t for t in known if any(reg.is_a(t, x) for x in lk.to_types if x != "any")
+                 or ("any" in lk.to_types and t in stated_named)]
+            named_ends = set(lk.from_types) | set(lk.to_types) | (stated_named if "any" in set(lk.from_types) | set(lk.to_types) else set())
+            if a and b and set(self.creatable) & named_ends:
                 self.links[name] = (a, b)
         used = {t for a, b in self.links.values() for t in a + b}
         self.resolvable = [t for t in self.resolvable if t in used]
@@ -148,40 +172,96 @@ class Catalog:
         return f"{n} ({'|'.join(s.enum)})" if s.enum else f"{n} (date)" if s.type == "time" else \
             f"{n} (number)" if s.type == "number" else f"{n} (true|false)" if s.type == "boolean" else n
 
-    def describe(self, types=None, links=None, link_values=False) -> str:
+    def _about_type(self, t, detail):
+        rt = self.reg.record(t)
+        how = detail.get("types")
+        text = (rt.about or rt.description) if how else (rt.description or rt.about)
+        text = first_sentence(text) if how == "first" else text
+        return (text or "found in " + rt.source).rstrip(". ")
+
+    def _fields_text(self, specs, layer, detail, plain):
+        """A type's (or a link's) fields: `plain` (name and value kinds) on one line, or with the registry's
+        description of each when the `layer` is in `detail`, one per line."""
+        if not specs:
+            return ""
+        how = detail.get(layer)
+        if not how:
+            return ". Fields: " + plain
+        rows = []
+        for n, s in specs.items():
+            about = first_sentence(s.about) if how == "first" else s.about
+            rows.append(f"    {self._field_text(n, s)}" + (f": {about}" if about else ""))
+        return ". Fields:\n" + "\n".join(rows)
+
+    def _about_link(self, name, detail):
+        how = detail.get("links")
+        about = self.reg.link(name).about if how else ""
+        return f" ({first_sentence(about) if how == 'first' else about})" if about else ""
+
+    def describe(self, types=None, links=None, link_values=False, detail=None, with_links=True) -> str:
         """The prompt's schema section. link_values: list every field a link can carry (for a table, whose columns
-        may hold a link's date or count), not only the named values a text states."""
-        reg = self.reg
+        may hold a link's date or count), not only the named values a text states. detail: which of the
+        registry's descriptions (DETAIL_LAYERS) are shown, each "full" or "first" (its first sentence); the
+        rest show the short description only (see schema_text, which fits them to a budget). with_links: False
+        for the record types alone (describe_tables lists the links itself, with every end a table may use)."""
+        reg, detail = self.reg, detail or {}
         types = set(types or self.creatable + self.resolvable)
         out = ["RECORD TYPES you may name. Types marked NEW may be created from this text; the others exist only when "
                "the organisation's tools already hold them, so name one only to link to it."]
         for t in self.creatable + self.resolvable:
             if t not in types:
                 continue
-            rt = reg.record(t)
             named = " or ".join(self.names(t)) or "-"
-            line = f"- {t}{' NEW' if t in self.creatable else ''}: {rt.description or 'found in ' + rt.source}. Named by {named}"
+            line = f"- {t}{' NEW' if t in self.creatable else ''}: {self._about_type(t, detail)}. Named by {named}"
             if t in self.creatable:
                 if (tf := self.text_field(t)):
                     line += f"; stated in {tf}"
-                if (fs := self.fields(t)):
-                    line += ". Fields: " + ", ".join(self._field_text(n, s) for n, s in fs.items())
+                fs = self.fields(t)
+                line += self._fields_text(fs, "fields", detail, ", ".join(self._field_text(n, s) for n, s in fs.items()))
             out.append(line)
-        out += ["", "LINK TYPES (from -> to). Use only these, only in this direction, only between these types."]
+        if not with_links:
+            return "\n".join(out)
+        out += ["", LINK_HEAD]
         for name, (a, b) in self.links.items():
             if links is not None and name not in links:
                 continue
             a, b = [t for t in a if t in types], [t for t in b if t in types]
             if not a or not b:
                 continue
-            line = f"- {name}: {' | '.join(a)} -> {' | '.join(b)}"
+            line = f"- {name}: {' | '.join(a)} -> {' | '.join(b)}{self._about_link(name, detail)}"
             if link_values:
-                if (lv := self.link_value_text(name)):
-                    line += ". Fields: " + lv
+                line += self._link_values(name, detail)
             elif (lf := self.link_fields(name)):
-                line += ". Fields: " + ", ".join(f"{n} ({'|'.join(vals)})" for n, vals in lf.items())
+                specs = {n: self.reg.link(name).fields[n] for n in lf}
+                line += self._fields_text(specs, "link_fields", detail, ", ".join(f"{n} ({'|'.join(vals)})" for n, vals in lf.items()))
             out.append(line)
         return "\n".join(out)
+
+    def _link_values(self, name, detail):
+        return self._fields_text(self.link_value_fields(name), "link_fields", detail, self.link_value_text(name))
+
+    def schema_text(self, which: str, budget: int):
+        """The schema section for one kind of prompt ("documents": describe(), "tables": describe_tables()) with as
+        many of the registry's descriptions as fit `budget` characters: each layer the prompt carries (LAYERS_FOR)
+        in full when they fit; when not, the layers least needed give way first (record fields, then link fields,
+        then links, then types), each first cut to its first sentence, then left out.
+        Returns (text, {"detail": {layer: full|first}, "chars": n, "chars_without_descriptions": n}). Cached."""
+        key = (which, int(budget))
+        if key not in self._schema_cache:
+            render = self.describe if which == "documents" else self.describe_tables
+            layers = LAYERS_FOR[which]
+            states = [{layer: "full" for layer in layers}]
+            for layer in reversed(layers):   # the order the layers give way in
+                states.append({**states[-1], layer: "first"})
+                states.append({k: v for k, v in states[-1].items() if k != layer})
+            for detail in states:
+                text = render(detail=detail)
+                if len(text) <= budget:
+                    break
+            bare = len(render(detail={}))
+            self._schema_cache[key] = (text, {"detail": detail, "chars": len(text), "chars_without_descriptions": bare,
+                                              "budget_chars": int(budget)})
+        return self._schema_cache[key]
 
     def key_fields(self, rtype):
         """The fields a table column may hold as a row's own key (a number, a sha, an id): a plain text or number
@@ -189,30 +269,25 @@ class Catalog:
         f = self.reg.record(rtype).fields
         return {n: s for n, s in self.fields(rtype).items() if s.type in ("any", "number")} | {n: f[n] for n in self.names(rtype)}
 
-    def describe_tables(self) -> str:
-        """The table prompt's schema: the document catalog, then the other tools' record types and the links
-        between them, each with the fields a cell can fill."""
-        reg = self.reg
+    def describe_tables(self, detail=None) -> str:
+        """The table prompt's schema: the document catalog's record types, then the other tools' record types, then
+        every link a table row may state, each with every end a table may use (a pull request's ABOUT a service, not
+        only a document's) and the fields a cell can fill. detail: as for describe()."""
+        detail = detail or {}
         known = set(self.creatable + self.resolvable)
-        out = [self.describe(link_values=True), "",
+        out = [self.describe(link_values=True, detail=detail, with_links=False), "",
                "RECORD TYPES OF OTHER TOOLS. A table may be an export of another tool (a commit log, a merge log, a list of "
                "pull requests or tickets): its rows may then be records of one of these types. Code matches each row to "
                "the tool's own record by the row's key field (or its name) and creates one only when the graph has none."]
         for t in self.table_types:
             if t in known:
                 continue
-            rt = reg.record(t)
             fs = self.fields(t)
-            out.append(f"- {t}: {rt.description or 'found in ' + rt.source}. Named by {' or '.join(self.names(t)) or '-'}"
-                       + (". Fields: " + ", ".join(self._field_text(n, s) for n, s in fs.items()) if fs else ""))
-        out += ["", "MORE LINK TYPES, for rows of those types (from -> to)."]
+            out.append(f"- {t}: {self._about_type(t, detail)}. Named by {' or '.join(self.names(t)) or '-'}"
+                       + self._fields_text(fs, "fields", detail, ", ".join(self._field_text(n, s) for n, s in fs.items())))
+        out += ["", LINK_HEAD]
         for name, (a, b) in self.table_links.items():
-            if name in self.links:
-                continue
-            line = f"- {name}: {' | '.join(a)} -> {' | '.join(b)}"
-            if (lv := self.link_value_text(name)):
-                line += ". Fields: " + lv
-            out.append(line)
+            out.append(f"- {name}: {' | '.join(a)} -> {' | '.join(b)}{self._about_link(name, detail)}" + self._link_values(name, detail))
         return "\n".join(out)
 
     def summary(self) -> dict:

@@ -24,7 +24,7 @@ import re
 from pathlib import Path
 
 from .access import place
-from .common import Graph, file_props, first_tags, release_branch_commits, repo_commits, ticket_rx, utc
+from .common import Graph, commit_changes, file_props, first_tags, release_branch_commits, repo_commits, ticket_rx, utc
 
 NOREPLY = re.compile(r"^(\d+)\+([^@]+)@users\.noreply\.github\.com$")
 PRNUM = re.compile(r"\(#(\d+)\)\s*$")
@@ -101,7 +101,9 @@ def map_git(g: Graph, d: Path):
             m = NOREPLY.match(addr)
             if m:  # the address itself names the GitHub account
                 uid, login = int(m.group(1)), m.group(2)
+                # "[bot]" ends only an app's bot login: the code host reserves it (a person's login cannot hold brackets)
                 acct = gh_accounts.get(uid) or g.rec("Account", "github", uid, {"login": login, "status": "active",
+                                                     "is_bot": True if login.endswith("[bot]") else None,
                                                      "tool": "github"}, scope)
                 gh_accounts[uid] = acct
                 g.link("ADDRESS_OF", emails[addr], acct, "field", confidence=1.0)
@@ -137,6 +139,13 @@ def map_git(g: Graph, d: Path):
     g.notes["git: release-branch commits not on the default branch"] = len(released)
     tag_of = first_tags(d, [c["sha"] for c in rows])  # the earliest tag holding each commit
     g.notes["git: commits with the first tag that contains them"] = len(tag_of)
+    # every commit's file changes as blob ids, from repo.git's trees (no contents, no fetch): the file list of a commit
+    # read without one (a release-branch or tag commit), and which commits carry the identical change
+    changes = commit_changes(d, [c["sha"] for c in rows])
+    for c in rows:
+        if not c["files"] and changes.get(c["sha"]):
+            c["files"] = [{"status": st, "path": path} for _, _, _, _, st, path in changes[c["sha"]]]
+            g.notes["git: commits whose file list was read from repo.git's trees"] += 1
     picked = []  # (release-branch commit, the PR its subject names): linked to that PR's default-branch commit below
     for c in rows:
         authored, committed = utc(c["authored_at"]), utc(c["committed_at"])
@@ -158,7 +167,12 @@ def map_git(g: Graph, d: Path):
         for name, addr in co:
             g.link("AUTHORED_BY", commit, address(addr, name), "field", role="co_author", at=authored)
         if (c["committer_email"] or "").lower() == "noreply@github.com":
-            g.notes["git: committed by GitHub's web merge (merger comes from the PR's merged_by)"] += 1
+            # the code host recorded the commit itself (a web merge): its address, marked as automation, never a person;
+            # the person who merged comes from the PR's merged_by
+            web = address(c["committer_email"], c["committer_name"])
+            web["props"]["kind"] = "automation"
+            g.link("AUTHORED_BY", commit, web, "field", role="committer", at=committed)
+            g.notes["git: committed by GitHub's web merge (committer is the code host's automation address)"] += 1
         elif c["committer_email"]:
             g.link("AUTHORED_BY", commit, address(c["committer_email"], c["committer_name"]), "field", role="committer",
                    at=committed)
@@ -206,4 +220,27 @@ def map_git(g: Graph, d: Path):
         if num in default_by_pr:
             g.link("CHERRY_PICKED_FROM", commit, default_by_pr[num], "convention", 0.9, kind="cherry_pick")  # same PR
     g.notes["git: release-branch commits linked to their default-branch original (same PR)"] = sum(n in default_by_pr for _, n in picked)
+    _equivalent(g, commits, rows, changes)
     g.ctx["git_emails"] = emails
+
+
+def _equivalent(g, commits, rows, changes):
+    """Commits that carry the identical change under different shas (a cherry-pick or rebase onto an unchanged file):
+    the same files going from the same blob to the same blob, with the same modes. Identical blob changes are an
+    identical patch, so git's patch id would be equal too; the patch id itself needs the file contents, which a
+    blobless clone does not hold, so it is not stored. Each later commit is EQUIVALENT_TO the earliest one."""
+    groups = {}
+    for c in rows:
+        ch = changes.get(c["sha"])
+        if ch:
+            groups.setdefault(tuple(sorted(ch)), []).append(commits[c["sha"]])
+    linked = 0
+    for members in groups.values():
+        if len(members) < 2:
+            continue
+        members.sort(key=lambda r: (r["props"].get("committed_at") or "", r["props"]["sha"]))
+        for other in members[1:]:
+            g.link("EQUIVALENT_TO", other, members[0], "inferred", 1.0, evidence=[other, members[0]], derived=True,
+                   rule_id="derive:equivalent_by_identical_blob_changes", kind="identical_change")
+            linked += 1
+    g.notes["git: commits EQUIVALENT_TO an earlier commit with the identical change"] = linked

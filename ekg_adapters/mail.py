@@ -10,10 +10,14 @@ Classifies each message, with the senders and patterns from the project's settin
     that PR or issue when it is the project's repo; a notice for another repo, and CI notices, are counted
   - a person's message DISCUSSES the ticket keys in its subject, MENTIONS those only in its body, LINKS_TO
     the PRs and issues it links, and a [DISCUSS] / [VOTE] thread about a decision key is where that
-    decision was made (MADE_IN)
+    decision was made (MADE_IN), as is a vote thread's result message
+  - an announcement (settings.announce_subject, e.g. "[ANNOUNCE] ...") whose subject names a release's version
+    ANNOUNCES that Release
 A message that can't be read is skipped and counted with its reason; one without a Message-ID gets a
 stable generated one. The same message twice in one list is kept once; in two lists it is one message
-IN both. Senders the list rewrote to "Name via list" keep no address, so they get no FROM link.
+IN both. A sender the list rewrote to "Name via list" gets a FROM link (method inferred, kind relayed) only when
+what the list kept names them (X-Original-From, or the one Cc / Reply-To address under that same name); otherwise
+only sender_name says who sent it. Threads follow In-Reply-To and References across every archive (_threads).
 """
 
 import datetime as dt
@@ -94,10 +98,11 @@ def map_mail(g: Graph, d: Path):
     decision_rx = re.compile(rf"\[(DISCUSS|VOTE|RESULT)\].*?\b{re.escape(s['decision_prefix'])}-(\d+)\b", re.I) \
         if s.get("decision_prefix") else None
     github_issues = s.get("issue_tracker") == "github"
-    lists, messages, addresses, threads, decided = {}, g.ctx.setdefault("emails", {}), {}, {}, set()
+    lists, messages, addresses, threads, decided = {}, g.ctx.setdefault("emails", {}), {}, [], set()
     in_list = set()  # (message id, list address): the same copy twice in one list is one copy
     boxes = sorted((d / "mail").glob("*/*.mbox")) + sorted((d / "mail").glob("*.mbox"))
     parents = []
+    announce_rx = re.compile(s["announce_subject"], re.I) if s.get("announce_subject") else None
     for mb in boxes:
         folder = mb.parent.name if mb.parent != d / "mail" else mb.stem
         try:
@@ -108,7 +113,7 @@ def map_mail(g: Graph, d: Path):
         for m in box:
             try:
                 _one(g, m, folder, s, lists, messages, addresses, threads, decided, in_list, parents, key_rx, repo,
-                     notifiers, ci_rx, decision_rx, github_issues, notice_rx)
+                     notifiers, ci_rx, decision_rx, github_issues, notice_rx, announce_rx)
             except Exception as e:  # one bad message never stops the run
                 g.notes[f"mail: message skipped ({type(e).__name__})"] += 1
     for mid, parent in parents:
@@ -116,10 +121,81 @@ def map_mail(g: Graph, d: Path):
             g.link("REPLY_TO", messages[mid], messages[parent], "field")
         elif parent:
             g.notes["mail: reply whose parent is outside the window"] += 1
+    _threads(g, threads)
+
+
+def _threads(g, pending):
+    """Threads, once every archive (every month, every list) is read: a message is in the thread of every message
+    its In-Reply-To and References name, transitively, so a reply whose client cut References short (a web archive's
+    reply names only its parent) still joins its thread. The thread's root id is its earliest message's root (the
+    first id in its References, else its In-Reply-To, else its own id). A thread that names a decision in a subject
+    is where that decision was made (MADE_IN), from its earliest such message per stage ([DISCUSS], [VOTE], [RESULT])."""
+    up = {}
+
+    def find(x):
+        while up.get(x, x) != x:
+            up[x] = up.get(up[x], up[x])
+            x = up[x]
+        return x
+
+    for p in pending:
+        for other in p["ids"][1:]:
+            ra, rb = find(p["ids"][0]), find(other)
+            if ra != rb:
+                up[ra] = rb
+    groups = {}
+    for p in pending:
+        groups.setdefault(find(p["ids"][0]), []).append(p)
+    for members in groups.values():
+        members.sort(key=lambda p: (p["sent"], p["msg"]["props"]["message_id"]))
+        first = members[0]
+        root = first["root"]
+        thread = g.rec("EmailThread", "mail", root, {"root_message_id": root, "normalized_subject": re.sub(
+            r"^((re|fwd?|aw):\s*)+", "", first["subject"], flags=re.I)}, [list(first["msg"]["scope"][0])])
+        decided = set()
+        for p in members:
+            g.link("IN", p["msg"], thread, "field", valid_from=p["sent"])
+            if p["sender"] is not None:
+                g.link("PARTICIPATED_IN", p["sender"], thread, p["sender_method"], p["sender_conf"],
+                       evidence=[p["msg"]], role="replied" if p["reply"] else "started", valid_from=p["sent"])
+            if p["decision"] is not None and p["decision"] not in decided:  # (proposal, DISCUSS | VOTE | RESULT)
+                decided.add(p["decision"])
+                g.ref(p["msg"], "MADE_IN", "Decision", p["decision"][0], "text_rule", 0.8, reverse=True, at=p["sent"])
+        split = len({p["root"] for p in members})
+        if split > 1:  # read message by message, these were `split` threads
+            g.notes["mail: threads joined across a cut References chain"] += 1
+            g.notes["mail: thread records merged away by that join"] += split - 1
+    g.notes["mail: threads"] = len(groups)
+
+
+def _norm_name(name):
+    return " ".join((name or "").replace('"', " ").split()).casefold()
+
+
+def _relayed_sender(m, name, lists):
+    """The real sender of a message whose From the list rewrote to its own address, from what the list kept:
+    an X-Original-From header, else the one Cc or Reply-To address shown under the very name the rewritten From
+    carries ("Ada Lovelace via dev" -> "Ada Lovelace <ada@example.org>" in Cc, which is where a list that rewrites
+    From for DMARC puts the original). Returns (address, display name, how) or (None, None, why not)."""
+    _, orig = email.utils.parseaddr(header(m["X-Original-From"])) if m["X-Original-From"] else ("", "")
+    if orig and "@" in orig and orig.lower() not in lists:
+        return orig.lower(), email.utils.parseaddr(header(m["X-Original-From"]))[0] or name, "X-Original-From header"
+    want = _norm_name(name)
+    if not want:
+        return None, None, "no display name"
+    hits = {}
+    for h in ("Cc", "Reply-To"):
+        for n, a in email.utils.getaddresses([header(m[h])] if m[h] else []):
+            if a and "@" in a and a.lower() not in lists and _norm_name(n) == want:
+                hits[a.lower()] = n
+    if len(hits) == 1:
+        (a, n), = hits.items()
+        return a, n, "Cc/Reply-To address under the same display name"
+    return None, None, "several addresses under that name" if hits else "no preserved header names the sender"
 
 
 def _one(g, m, folder, s, lists, messages, addresses, threads, decided, in_list, parents, key_rx, repo,
-         notifiers, ci_rx, decision_rx, github_issues, notice_rx):
+         notifiers, ci_rx, decision_rx, github_issues, notice_rx, announce_rx=None):
     addr = s["mail_lists"].get(folder) or _list_address(m) or folder
     if addr not in lists:
         scope, _ = place(g, "mail", "mailing_list", addr)
@@ -162,37 +238,49 @@ def _one(g, m, folder, s, lists, messages, addresses, threads, decided, in_list,
     parent = (m["In-Reply-To"] or "").strip()
     parents.append((mid, parent))
     root = refs[0] if refs else (parent or mid)
-    if root not in threads:
-        threads[root] = g.rec("EmailThread", "mail", root, {"root_message_id": root,
-                              "normalized_subject": re.sub(r"^((re|fwd?|aw):\s*)+", "", subject, flags=re.I)},
-                              [list(lst["scope"][0])])
-    g.link("IN", msg, threads[root], "field", valid_from=sent)
+    # the thread is settled once every archive is read (_threads): the ids this message ties together
+    pending = {"msg": msg, "ids": [mid] + refs + ([parent] if parent else []), "root": root, "sent": sent,
+               "subject": subject, "reply": bool(parent), "sender": None, "sender_method": "field",
+               "sender_conf": 1.0, "decision": None}
+    threads.append(pending)
 
     if name and not msg["props"].get("sender_name"):  # the display name as sent ("Ada Lovelace (Jira)")
         msg["props"]["sender_name"] = re.sub(r"\s+via\s+\S+$", "", name).strip().strip('"') or None
+    relayed = None
+    if sender and sender in lists:  # the list rewrote From to itself: what it kept may still name the sender
+        name = re.sub(r"\s+via\s+\S+$", "", name or "").strip().strip('"')
+        if name:
+            msg["props"]["sender_name"] = name
+        msg["props"]["self_reported_sender"] = True  # the From header itself names only the list
+        relayed, orig_name, how = _relayed_sender(m, name, lists)
+        if relayed:
+            g.notes[f"mail: relayed sender recovered ({how}; FROM method inferred)"] += 1
+        else:
+            g.notes[f"mail: relayed sender not recovered ({how}; sender_name kept, no FROM link)"] += 1
     for cc_name, cc in email.utils.getaddresses([header(m["Cc"])] if m["Cc"] else []):
         cc = cc.lower()
-        if cc and "@" in cc and cc not in lists:
+        if cc and "@" in cc and cc not in lists and cc != relayed:  # the relayed sender's own copy is not a recipient
             if cc not in addresses:
                 addresses[cc] = g.rec("EmailAddress", "email", cc, {"address": cc, "display_name": cc_name or None,
                                       "normalized_value": cc}, lst["scope"])
             g.link("SENT_TO", msg, addresses[cc], "field", role="cc", at=sent)
+    if relayed:
+        sender, name = relayed, orig_name or name
     tool = notifiers.get(sender)
     if not sender:
         g.notes["mail: From header with no parseable address"] += 1
-    elif sender in lists:  # the list rewrote From to itself: only the display name is the sender's
-        name = re.sub(r"\s+via\s+\S+$", "", name or "").strip().strip('"')
-        if name:
-            msg["props"]["sender_name"] = name
-        msg["props"]["self_reported_sender"] = True  # the list relayed it: only the display name says who sent it
-        g.notes["mail: sender rewritten to the list address (sender_name kept, no FROM link)"] += 1
+    elif sender in lists:
+        pass  # relayed, and the list kept nothing that names the sender (counted above)
     else:
         if sender not in addresses:
             addresses[sender] = g.rec("EmailAddress", "email", sender, {"address": sender, "display_name": name or None,
                                       "normalized_value": sender, "kind": "automation" if tool else None}, lst["scope"])
-        g.link("FROM", msg, addresses[sender], "field", role="sender", at=sent)
-        g.link("PARTICIPATED_IN", addresses[sender], threads[root], "field", role="replied" if parent else "started",
-               valid_from=sent)
+        if relayed:  # read from what the list preserved, not from the From header: inferred, and marked as relayed
+            g.link("FROM", msg, addresses[sender], "inferred", 0.85, evidence=[msg], role="sender", kind="relayed", at=sent)
+            pending.update(sender_method="inferred", sender_conf=0.85)
+        else:
+            g.link("FROM", msg, addresses[sender], "field", role="sender", at=sent)
+        pending["sender"] = addresses[sender]
 
     # ---- notifications from integrations
     if tool == "tracker":  # the ticket key: where the project's notice format puts it, else the first known key
@@ -237,11 +325,32 @@ def _one(g, m, folder, s, lists, messages, addresses, threads, decided, in_list,
             g.ref(msg, "MENTIONS", "GitHubRef", int(num), "text_rule", 0.6, kind="key", at=sent)
     if decision_rx:
         dt_hit = decision_rx.search(subject)
-        if dt_hit and root not in decided:  # once per thread: its first message in the archive
-            decided.add(root)
-            g.ref(msg, "MADE_IN", "Decision", int(dt_hit.group(2)), "text_rule", 0.8, reverse=True, at=sent)
+        if dt_hit:  # MADE_IN once per thread and stage (a vote may be called in the discussion thread), from its earliest
+            pending["decision"] = (int(dt_hit.group(2)), dt_hit.group(1).upper())
         if dt_hit and dt_hit.group(1).upper() in ("VOTE", "RESULT") and s.get("vote_threads"):
             _votes(g, msg, int(dt_hit.group(2)), quoted, addresses.get(sender) if sender not in lists else None, sent)
+    if announce_rx and not pending["reply"] and announce_rx.search(subject):
+        _announces_release(g, msg, subject, sent)
+
+
+VERSION_TOKEN = re.compile(r"(?<![\w.])v?(\d+(?:\.\d+)+(?:[-.]?[A-Za-z][\w.-]*)?)(?![\w.]*\w)")
+
+
+def _announces_release(g, msg, subject, sent):
+    """A person's announcement (the project's announce_subject, not a reply) that names a release's version in its
+    subject ANNOUNCES that Release: the version as a whole token ("Apache Kafka 4.4.0", "v1.2.0"), matched exactly
+    against the versions the trackers and code host gave. A version that is several releases, or none, is counted."""
+    by_version = g.ctx.get("releases_by_version") or {}
+    found = {v for v in VERSION_TOKEN.findall(subject) if v in by_version}
+    if not found:
+        g.notes["mail: announcements naming no known release version"] += 1
+        return
+    for v in sorted(found):
+        if len(by_version[v]) != 1:
+            g.notes["mail: announcements naming a version several releases share (not linked)"] += 1
+            continue
+        g.link("ANNOUNCES", msg, by_version[v][0], "text_rule", 0.9, evidence=[msg], kind="announce", at=sent)
+        g.notes["mail: announcements of a release (ANNOUNCES the Release)"] += 1
 
 
 def _votes(g, msg, proposal, text, voter, sent):
@@ -260,6 +369,9 @@ def _votes(g, msg, proposal, text, voter, sent):
         if sent and (proposal not in tallies or (tallies[proposal]["at"] or "") <= sent):
             tallies[proposal] = {**tally, "at": sent}
         g.notes["mail: proposal vote tallies read from a vote thread"] += 1
+        # the result message reports the outcome: the decision was made there too
+        g.ref(msg, "MADE_IN", "Decision", proposal, "text_rule", 0.85, reverse=True, at=sent)
+        g.notes["mail: vote result messages (MADE_IN their Decision)"] += 1
         return  # a message that reports the tally does not cast a vote
     head = []  # the reply's own words, before the quoted message ("On ... wrote:")
     for line in text.strip().splitlines()[:12]:
@@ -320,6 +432,7 @@ def _acceptance(g, msg, proposal, text, voter, sent):
             state["withdrawn"]["valid_to"] = sent
             state["withdrawn"] = None
         state["by"], state["at"] = who["id"], sent
+        g.ref(msg, "MADE_IN", "Decision", proposal, "text_rule", 0.85, reverse=True, at=sent)  # the acceptance message
         return
     settings = g.ctx.get("settings") or {}
     own = settings.get("withdrawal_phrases")

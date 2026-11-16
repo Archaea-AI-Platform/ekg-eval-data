@@ -38,13 +38,22 @@ ASK = ("List every record and every link this text states, using only the record
        "- records: everything of a listed type the text names (a person, a team, a role, a service, a topic, a ticket ...) "
        "or states (a decision, a rule, a requirement, a how-to, a task someone took on, an open question ...). "
        "Give each a ref (r1, r2 ...) of your own.\n"
-       "- name: exactly as the text writes it (the full name, the key, the address). Empty for a type that is not named by a field.\n"
+       "- type: the listed type whose description fits what the text says, whatever the section is called. Something "
+       "a product, a system or a change has to do or must not do is a Requirement; a Guideline is a rule for how the "
+       "team itself works. An item that a requirements document numbers with an id of its own (as the passage's "
+       "heading or the item's first words show) is a Requirement.\n"
+       "- name: exactly as the text writes it (the full name, the key, the address). Empty for a type that is not named "
+       "by a field. For a stated item the text gives an id of its own (a requirement's id), the name starts with that "
+       "id as written, then a few words.\n"
        "- statement: for a type that is \"stated in\" a field, one sentence in your own words saying it; else empty.\n"
        "- fields: only values the text gives for that type's listed fields; dates as YYYY-MM-DD. Leave out what it does not say.\n"
        "- quote: copy word for word, from ONE passage, the words (under 300 characters) that name or state it; "
        "source: that passage's label.\n"
-       "- links: from and to are refs of records in your list. quote and source: the words that state the link "
-       "itself, not just the two names near each other.\n"
+       "- links: every relation the text states between two records in your list, in whatever words (X is owned "
+       "by Y, Y is responsible for X, A depends on B, the contact for Z is W, a requirement is about a service or "
+       "an area ...), as the listed link type whose "
+       "description says that, in the direction its description gives. from and to are refs of records in your "
+       "list. quote and source: the words that state the link itself, not just the two names near each other.\n"
        "- Report only what the text states. Skip navigation, boilerplate, and examples that only illustrate.\n"
        "- There is no limit on how many: report all of them. Empty lists are right when nothing qualifies.\n"
        'Reply with one JSON object: {{"records": [{{"ref", "type", "name", "statement", "fields": [{{"field", "value"}}], '
@@ -56,9 +65,15 @@ def _header():
     return HEADER
 
 
+def catalog_text(catalog):
+    """The document prompt's schema section, with as many of the registry's descriptions as the budget allows."""
+    from . import fill
+    return catalog.schema_text("documents", (getattr(catalog, "budget", None) or fill.BUDGET).schema_chars)[0]
+
+
 def overhead(catalog) -> int:
     """Characters of a doc_facts prompt that are not the document: instructions, the schema, the reply format."""
-    return len(_header()) + len(ASK.format(catalog=catalog.describe())) + len(json.dumps(schema(catalog, ["P1"]))) + 400
+    return len(_header()) + len(ASK.format(catalog=catalog_text(catalog))) + len(json.dumps(schema(catalog, ["P1"]))) + 400
 
 
 def build(v):
@@ -83,7 +98,7 @@ def build(v):
 
 def prompt(t: Task, catalog, sources=None):
     from .fill import _text_block
-    return "\n".join([_header(), ""] + _text_block(t, sources) + ["", ASK.format(catalog=catalog.describe())])
+    return "\n".join([_header(), ""] + _text_block(t, sources) + ["", ASK.format(catalog=catalog_text(catalog))])
 
 
 def schema(catalog, labels):
@@ -222,7 +237,7 @@ FOLLOW_UP = ("NOT COVERED YET: an earlier reading of this document listed nothin
 
 def follow_up_prompt(t: Task, catalog, sources):
     from .fill import _text_block
-    return "\n".join([_header(), ""] + _text_block(t, sources) + ["", FOLLOW_UP, "", ASK.format(catalog=catalog.describe())])
+    return "\n".join([_header(), ""] + _text_block(t, sources) + ["", FOLLOW_UP, "", ASK.format(catalog=catalog_text(catalog))])
 
 
 async def settle(t: Task, ask, catalog):
@@ -409,6 +424,14 @@ def apply(w, t: Task, e):
                     if found:
                         break
         found = found or (find(w, x["name"], rtype, tool) if named else [])
+        # a numbered item stated again in the same document (its own id written in the passage: a follow-up reading
+        # of a paragraph, or the next window) is the record already made for it, never a second one
+        item_key = None
+        if not found and rtype in cat.stated and (m := ITEM_ID.match(x["name"]))                 and find_quote(m.group(0), [s for s in t.sources if s.id == src["id"]]):
+            item_key = (t.subject, rtype, m.group(0))
+            if item_key in w.stated_items:
+                found = [w.stated_items[item_key]]
+                c[f"{rtype}: the same numbered item again in its document, the record made for it"] += 1
         if not found and named and rtype not in cat.stated and cat.name_field(rtype) == PERSONAL_NAME:
             found = v.by_name_prefix(x["name"], {rtype})   # "Lionel" -> the one "Lionel eng-orders" whose team is eng-orders
         bare = named and rtype not in cat.stated and thin(cat, rtype, x)
@@ -445,6 +468,8 @@ def apply(w, t: Task, e):
             continue
         else:
             state[ref] = _create(w, cat, t, x, src, doc, quality)
+            if state[ref] and item_key:
+                w.stated_items[item_key] = state[ref]["rec"]
         if state[ref] and state[ref]["how"] != "new":
             _mention(w, t, state[ref], src, quality)
     for l in e["links"]:
@@ -587,3 +612,106 @@ def not_chosen(w, choice: Task):
             if not l.get("_done"):
                 l["_done"] = True
                 w.facts[f"{l['type']}: an end could not be resolved, not linked"] += 1
+
+
+# ---------------------------------------------------------------- ids one record cites of another (code only)
+
+# an item's id as documents number them: capitals and digits, dash-joined, ending in a number (PAY-12, ORD-OM-03)
+ITEM_ID = re.compile(r"(?<![\w-])[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)*-\d+(?![\w-])")
+REFERENCE_RELATION = "REFERENCES"   # the registry's relation of a link that says "A refers to B" (LINKS_TO ...)
+
+
+def own_id(rec, cat):
+    """The id a stated record (a requirement, a decision ...) carries as its own: the id its name starts with,
+    else the one its statement starts with. None when it has none."""
+    p = rec["props"]
+    for f in (cat.name_field(rec["type"]), cat.text_field(rec["type"])):
+        m = ITEM_ID.match(str(p.get(f) or "").strip()) if f else None
+        if m:
+            return m.group(0)
+    return None
+
+
+def _quotes(rec):
+    """(source id, quoted words) of every value a record's _stated citations hold."""
+    for st in (rec["props"].get("_stated") or {}).values():
+        for src, by in (st.get("by") or {}).items():
+            for q in (by or {}).values():
+                if isinstance(q, str) and q:
+                    yield src, q
+
+
+def _reference_link(reg, a_type, b_type):
+    """A link of the registry's reference relation that joins these two types directly, else None."""
+    return next((n for n, lk in sorted(reg.links.items()) if lk.relation == REFERENCE_RELATION and not lk.internal
+                 and reg.link_allows(n, a_type, b_type)), None)
+
+
+def link_cited_ids(w):
+    """After every document is read: a stated record whose own words (its quote, its statement) write another
+    record's own id (own_id) cites that record, in any document. Code only, no model call. The link is a
+    reference link the registry allows between the two records when it has one; else the cited record is linked
+    from the passage the citing record was quoted from (a Piece LINKS_TO any type), the citing record's quote as
+    evidence. An id that several records carry is not linked (counted)."""
+    cat, reg = w.v.catalog(), common._reg
+    stated = set(cat.stated)
+    recs = [r for r in w.g.records.values() if r["type"] in stated]
+    by_id = collections.defaultdict(list)
+    for r in recs:
+        if (i := own_id(r, cat)):
+            by_id[i].append(r)
+    out = collections.Counter()
+    out["records with an id of their own"] = sum(len(rs) for rs in by_id.values())
+    out["ids that several records carry (one per document, not linked)"] = sum(1 for rs in by_id.values() if len(rs) > 1)
+    done = set()
+    for r in recs:
+        mine = own_id(r, cat)
+        texts = [(src, q) for src, q in _quotes(r)] + [(None, str(r["props"].get(cat.text_field(r["type"]) or "") or ""))]
+        for src, text in texts:
+            for cited in dict.fromkeys(ITEM_ID.findall(text)):
+                if cited == mine or (r["id"], cited) in done:
+                    continue
+                done.add((r["id"], cited))
+                targets = [x for x in by_id.get(cited, []) if x["id"] != r["id"]]
+                if not targets:
+                    out["cited ids no record carries"] += 1
+                    continue
+                if len(targets) > 1:
+                    out["cited ids several records carry: not linked"] += 1
+                    continue
+                b = targets[0]
+                if _runs_into(text, b, cited):
+                    out["the quote runs on into the cited item's own words (two items quoted together): not a citation"] += 1
+                    continue
+                src = src if src in w.by_id else next((s for s, _ in _quotes(r) if s in w.by_id), None)
+                ltype = _reference_link(reg, r["type"], b["type"])
+                a = r
+                if ltype is None and src is not None:   # from the passage the citing record was quoted from
+                    a = w.by_id[src]
+                    ltype = _reference_link(reg, a["type"], b["type"])
+                if ltype is None:
+                    out[f"no reference link from a {r['type']} (or its passage) to a {b['type']}"] += 1
+                    continue
+                if a["id"] == b["id"]:
+                    continue
+                why = w._link(ltype, a, b, [src] if src else [], "id_reference", "reference", 1.0, method="text_rule")
+                out[f"{a['type']} {ltype} {b['type']}: " + ("written" if why is None else "not written, " + why[:80])] += 1
+    return dict(out)
+
+
+def _runs_into(text, b, cited):
+    """Does `text`, where it writes the cited id, go on with record b's own quoted words: a quote that ran on from
+    one numbered item into the next one, rather than one item citing another? Compared over the words both have
+    (at least 12 characters, at most 40)."""
+    from .fill import _norm
+    t, key = _norm(text), _norm(cited)
+    heads = [_norm(q) for _, q in _quotes(b)]
+    at = t.find(key)
+    while at >= 0:
+        tail = t[at:]
+        for q in heads:
+            n = min(len(tail), len(q), 40)
+            if n >= 12 and tail[:n] == q[:n]:
+                return True
+        at = t.find(key, at + 1)
+    return False

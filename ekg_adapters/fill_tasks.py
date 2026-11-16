@@ -154,6 +154,7 @@ class View:
     def catalog(self):
         if self._catalog is None:
             self._catalog = extract_schema.Catalog(common._reg, [t for t, rs in self.by_type.items() if rs])
+            self._catalog.budget = self.budget   # the prompts' schema sections are sized by this view's budget
         return self._catalog
 
     # ---- finding a record by what a text calls it

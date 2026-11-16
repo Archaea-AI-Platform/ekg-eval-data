@@ -14,6 +14,7 @@ fill_budget.sizes() turns both into a budget.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import os
 import sys
 from pathlib import Path
@@ -23,6 +24,39 @@ from . import fill_budget
 _get_client = _settings = _context = None
 MODEL: str | None = None
 _REPLY_LIMIT: tuple[int, str] = (0, "")  # what window discovery learned about the provider's reply cap
+# the token usage of the call in flight in this task: query-master's client reads `usage` off every 200 response
+# (LLMClient._record_token_usage); bind() wraps that method so that it also adds the numbers here, per call
+_CALL_USAGE: contextvars.ContextVar = contextvars.ContextVar("ekg_call_usage", default=None)
+
+
+def _count_usage():
+    """Wrap query-master's usage hook (once) so that each call's tokens reach the caller: prompt, completion
+    (thinking included), reasoning when the provider breaks it out, and cost when it reports one. Several
+    attempts of one call (a retry, a re-ask) add up. Nothing in query-master changes: its own recording runs too."""
+    from app.services.llm import client as qm_client
+    base = qm_client.LLMClient
+    if getattr(base, "_ekg_counts_usage", False):
+        return
+    original = base._record_token_usage
+
+    def record(self, resp):
+        try:
+            box = _CALL_USAGE.get()
+            if box is not None:
+                u = (resp.json() or {}).get("usage") or {}
+                for k in ("prompt_tokens", "completion_tokens"):
+                    box[k] = box.get(k, 0) + int(u.get(k) or 0)
+                reasoning = (u.get("completion_tokens_details") or {}).get("reasoning_tokens")
+                if reasoning:
+                    box["reasoning_tokens"] = box.get("reasoning_tokens", 0) + int(reasoning)
+                if isinstance(u.get("cost"), (int, float)):
+                    box["cost"] = round(box.get("cost", 0.0) + float(u["cost"]), 8)
+                box["attempts"] = box.get("attempts", 0) + 1
+        except Exception:   # best effort, never in the way of the call
+            pass
+        return original(self, resp)
+    base._record_token_usage = record
+    base._ekg_counts_usage = True
 
 
 def bind(query_master: Path, model: str | None = None) -> str:
@@ -35,6 +69,7 @@ def bind(query_master: Path, model: str | None = None) -> str:
     from app.services.llm import context_window
     from app.services.llm.client import get_llm_client
     _get_client, _settings, _context = get_llm_client, settings, context_window
+    _count_usage()
     MODEL = model or os.environ.get("EKG_LLM_MODEL") or settings.AGENTIC_LLM_MODEL or None
     # sizing follows query-master's own figures, so a change there changes it here
     fill_budget.PROMPT_SHARE = context_window.compact_at()
@@ -103,7 +138,16 @@ def reply_limit(override: int | None = None) -> tuple[int, str]:
 
 
 async def ask(prompt: str, name: str, schema: dict) -> dict:
-    """One structured call. Returns the parsed JSON object, or {"error": ...} as query-master's client does."""
+    """One structured call. Returns the parsed JSON object, or {"error": ...} as query-master's client does; either
+    carries the call's token usage under "_usage" when the provider reported it (not part of the answer)."""
     client = _get_client(model=MODEL)  # OpenRouter: the next key in the round robin
-    return await client.explain(prompt, model=MODEL, json_schema={"name": name, "strict": True, "schema": schema},
-                                priority="bulk")
+    box = {}
+    token = _CALL_USAGE.set(box)
+    try:
+        res = await client.explain(prompt, model=MODEL, json_schema={"name": name, "strict": True, "schema": schema},
+                                   priority="bulk")
+    finally:
+        _CALL_USAGE.reset(token)
+    if isinstance(res, dict) and box:
+        res = {**res, "_usage": box}
+    return res

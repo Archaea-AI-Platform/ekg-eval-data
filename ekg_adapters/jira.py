@@ -67,6 +67,7 @@ def map_jira(g: Graph, d: Path, project_key: str, repo: str):
         releases[v["id"]] = g.rec("Release", "jira", v["id"], {"version": v["name"], "archived": v.get("archived"),
                                   "published_at": day(v["releaseDate"]) if rel else None,
                                   "published_at_precision": "day" if rel else None}, scope)
+        g.ctx.setdefault("releases_by_version", {}).setdefault(v["name"], []).append(releases[v["id"]])
     labels = {}
 
     def label(name, kind):
@@ -98,6 +99,7 @@ def map_jira(g: Graph, d: Path, project_key: str, repo: str):
                     g.link("LED_BY", comp, account(c["lead"]), "field", role="lead")
 
     tickets = g.ctx.setdefault("tickets", {})
+    inward = []  # (ticket, its inward link): written from the other issue's side when that issue is not downloaded
     for p in sorted((d / "jira/issues").glob("*.json")):
         for i in J(p)["issues"]:
             f = i["fields"]
@@ -157,6 +159,9 @@ def map_jira(g: Graph, d: Path, project_key: str, repo: str):
                     g.link("CREATED_BY", att, account(a["author"]), "field", role="uploader", at=at)
             if f.get("resolution") and f["resolution"]["name"] in NON_FIX:
                 g.notes[f"jira: done as '{NON_FIX[f['resolution']['name']]}' by resolution (state type stays completed)"] += 1
+            if (f.get("resolution") or {}).get("name") == "Duplicate" and not any(
+                    LINK_TYPES.get(lk["type"]["name"], ("",))[0] == "DUPLICATE_OF" for lk in f.get("issuelinks") or []):
+                g.notes["jira: resolved Duplicate with no duplicate link naming the original (no DUPLICATE_OF)"] += 1
 
             # ---- links between tickets (outward side only; the inward side is the other issue's copy), dated by the
             # changelog entry that added them when there is one (who added it is that entry's Activity actor)
@@ -169,6 +174,8 @@ def map_jira(g: Graph, d: Path, project_key: str, repo: str):
             for lk in f.get("issuelinks") or []:
                 other = lk.get("outwardIssue")
                 if not other:
+                    if (lk.get("inwardIssue") or {}).get("key"):
+                        inward.append((t, lk, linked_at.get(lk["inwardIssue"]["key"]), linked_by.get(lk["inwardIssue"]["key"])))
                     continue
                 ltype, kind = LINK_TYPES.get(lk["type"]["name"], ("RELATED_TO", lk["type"]["outward"].replace(" ", "_")))
                 g.ref(t, ltype, "Ticket", other["key"], "field", stub=True, kind=kind, valid_from=linked_at.get(other["key"]),
@@ -197,6 +204,15 @@ def map_jira(g: Graph, d: Path, project_key: str, repo: str):
                     g.link("AUTHORED_BY", cm, account(c["author"]), "field", role="author", at=at)
                 for n in set(pr_url.findall(c["body"] or "")):
                     g.ref(cm, "LINKS_TO", "PullRequest", int(n), "field", 0.95, stub=True, kind="url", at=at)
+    # an inward link ("is duplicated by X") is X's outward link, which X's own copy writes; when X is outside the
+    # download only this side has it, so it is written here, in the outward direction (X -> this ticket)
+    for t, lk, at, by in inward:
+        if lk["inwardIssue"]["key"] in tickets:
+            continue
+        ltype, kind = LINK_TYPES.get(lk["type"]["name"], ("RELATED_TO", lk["type"]["outward"].replace(" ", "_")))
+        g.ref(t, ltype, "Ticket", lk["inwardIssue"]["key"], "field", stub=True, reverse=True, kind=kind, valid_from=at,
+              link_name=lk["type"].get("name"), added_by=by)
+        g.notes["jira: links known only from the inward side (the other issue is outside the download)"] += 1
     g.ctx["jira_accounts"] = accounts
 
 

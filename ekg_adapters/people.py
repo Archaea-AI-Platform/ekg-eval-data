@@ -271,7 +271,9 @@ def _asf_chair(g, d, roster, persons, positions, scope, s):
                          roster["display"])
     for uid in roster["chairs"]:
         if uid in persons:
-            g.link("HOLDS_POSITION", persons[uid], chair, "snapshot", kind="primary", valid_from=terms.get(uid))
+            since, dec = terms.get(uid, (None, None))  # the resolution that started the current term, when known
+            g.link("HOLDS_POSITION", persons[uid], chair, "snapshot", kind="primary", valid_from=since,
+                   evidence=[persons[uid]] + ([dec] if dec else []))
 
 
 MONTHS = {m: i for i, m in enumerate(("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"), 1)}
@@ -284,8 +286,9 @@ RECOMMENDED = re.compile(r"recommend ([A-Z][\w.' -]+?) \((\w+)\) as the successo
 def _chair_terms(g, d, persons, by_name, chair, scope, tool, display) -> dict:
     """The ASF board minutes (extra/people/board_minutes_*.html): each resolution that establishes the project or
     changes its chair becomes a dated Decision made in the minutes; each chair holds the seat from the day the board
-    appointed them until the next appointment (HOLDS_POSITION valid_from / valid_to), and SUCCEEDS the one before.
-    Returns {uid: the day the current term began}."""
+    appointed them until the next appointment (HOLDS_POSITION valid_from / valid_to, with the resolutions as its
+    evidence), and SUCCEEDS the one before. Each resolution AFFECTS the seat and is ABOUT the people it appoints
+    (role appointed) and replaces (role replaced). Returns {uid: (the day the current term began, its Decision)}."""
     files = sorted((d / "extra" / "people").glob("board_minutes_*.html")) if (d / "extra" / "people").is_dir() else []
     if not files:
         return {}
@@ -314,23 +317,30 @@ def _chair_terms(g, d, persons, by_name, chair, scope, tool, display) -> dict:
                        "new_uid": new_uid, "old": old.group(1).strip() if old else None,
                        "old_uid": old.group(2) if old else None, "recommended": bool(rec), "text": body[:3000]})
     events.sort(key=lambda e: e["at"])
-    terms = {}
-    for i, e in enumerate(events):
+    terms, decs = {}, []
+    for e in events:
         statement = (f"{e['title']}: {e['new']} ({e['new_uid']}) appointed Vice President, Apache {display} (PMC chair)"
                      + (f", succeeding {e['old']} ({e['old_uid']})" if e["old"] else "")
                      + (" on the PMC's recommendation" if e["recommended"] else "") + f"; Special Order {e['order']}")
-        dec = g.rec("Decision", tool, f"board:{e['at'][:10]}:{e['order']}", {
+        decs.append(g.rec("Decision", tool, f"board:{e['at'][:10]}:{e['order']}", {
             "identifier": f"Special Order {e['order']}", "title": e["title"], "statement": statement,
-            "rationale": e["text"], "status": "accepted", "decided_at": e["at"]}, scope)
+            "rationale": e["text"], "status": "accepted", "decided_at": e["at"]}, scope))
+    for i, (e, dec) in enumerate(zip(events, decs)):
         g.link("MADE_IN", dec, minutes, "field", at=e["at"])
+        # what the resolution governs: the seat (AFFECTS), and the people it appoints and replaces (ABOUT)
+        g.link("AFFECTS", dec, chair, "field", valid_from=e["at"])
+        for uid in dict.fromkeys((e["new_uid"], e["old_uid"])):
+            if uid in persons:
+                g.link("ABOUT", dec, persons[uid], "field", role="appointed" if uid == e["new_uid"] else "replaced")
         nxt = events[i + 1]["at"] if i + 1 < len(events) else None
         if e["new_uid"] in persons:
-            if nxt:  # a past term: the next appointment ended it
+            if nxt:  # a past term: this resolution started it and the next appointment ended it (both are evidence)
                 g.link("HOLDS_POSITION", persons[e["new_uid"]], chair, "field", kind="primary", valid_from=e["at"],
-                       valid_to=nxt)
+                       valid_to=nxt, evidence=[dec, decs[i + 1]])
             else:
-                terms[e["new_uid"]] = e["at"]
+                terms[e["new_uid"]] = (e["at"], dec)
             if e["old_uid"] in persons:
-                g.link("SUCCEEDS", persons[e["new_uid"]], persons[e["old_uid"]], "field", kind="predecessor", at=e["at"])
+                g.link("SUCCEEDS", persons[e["new_uid"]], persons[e["old_uid"]], "field", kind="predecessor", at=e["at"],
+                       evidence=[dec])
     g.notes["people: chair resolutions read from the board minutes"] = len(events)
     return terms

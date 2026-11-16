@@ -46,6 +46,9 @@ PROMPT_SHARE = 0.60               # query-master's compact_at() default; llm.bin
 CHARS_PER_TOKEN = 3.0             # query-master's DEFAULT_CHARS_PER_TOKEN; llm.bind() replaces it with the live value
 TYPICAL_CHARS_PER_TOKEN = 4.0     # for cost estimates only (English prose); sizing always uses CHARS_PER_TOKEN
 READ_SHARE_OF_REPLY = 0.5         # an extraction call reads at most this share of its reply room in text (see above)
+SLOW_TOKENS_PER_SECOND = 40      # Glimmer on OpenRouter wrote at least ~57 tokens/s (ACME v5: 14 mappings, up to 11,000
+                                  # tokens each, all done within 3.5 minutes at 16 in flight); 40 leaves room
+INSTRUCTION_CHARS = 10_000        # the rules, the reply format and a document's outline, besides the schema and the text
 
 
 @dataclass(frozen=True)
@@ -68,11 +71,33 @@ class Budget:
         """Characters of text one extraction call may read: thinking and answer grow with it and must fit the reply."""
         return int(self.reply_tokens * self.chars_per_token * READ_SHARE_OF_REPLY)
 
+    @property
+    def schema_chars(self) -> int:
+        """Characters the schema section of a document or table prompt may take, the registry's descriptions
+        included: what a prompt has left after the most text an extraction call reads and the instructions."""
+        return max(self.prompt_chars - self.read_chars - INSTRUCTION_CHARS, self.prompt_chars // 4)
+
+    @property
+    def mapping_reply_tokens(self) -> int:
+        """A table mapping names columns, never rows: its reply (thinking included) is small whatever the table's
+        size, but a reasoning model thinks first: on the first real run with the registry's descriptions, mappings
+        that thought for up to 11,000 of the 16,384 tokens a reply may take were sound. One longer than three
+        quarters of the reply is a mapping gone round in circles (fill.run reads that table as text)."""
+        return max(self.reply_tokens * 3 // 4, 1024)
+
+    @property
+    def mapping_seconds(self) -> int:
+        """How long a mapping call may run: mapping_reply_tokens at a slow pace (SLOW_TOKENS_PER_SECOND). A reply
+        cannot be capped per call, so this is the only bound on one that goes round in circles."""
+        return max(int(self.mapping_reply_tokens / SLOW_TOKENS_PER_SECOND), 60)
+
     def describe(self) -> dict:
         return {"window_tokens": self.window_tokens, "prompt_tokens": self.prompt_tokens, "reply_tokens": self.reply_tokens,
                 "prompt_chars": self.prompt_chars, "window_from": self.source,
                 "reply_limit_tokens": self.reply_limit or None, "reply_limit_from": self.reply_limit_from or "unknown",
-                "extraction_text_chars_per_call": self.read_chars}
+                "extraction_text_chars_per_call": self.read_chars, "schema_chars_per_prompt": self.schema_chars,
+                "mapping_reply_tokens_max": self.mapping_reply_tokens,
+                "mapping_seconds_max": self.mapping_seconds}
 
 
 def sizes(window_tokens: int | None = None, source: str = "", prompt_share: float | None = None,

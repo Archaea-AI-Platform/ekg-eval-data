@@ -8,9 +8,13 @@ even for files no commit touched. A File has the same key as the git adapter's, 
 README and documentation files are read like any other document (sections and pieces). Source files
 of every language there is a grammar for are parsed by symbols.py: types, functions and methods become
 CodeSymbols DEFINED_IN their file, with IMPORTS, EXTENDS and CALLS between symbols of the same repository.
+The code host's standard path maps in the repository are read too: a labeler config (label -> path globs: the
+folders and files it names HAS_LABEL that label) and a code-owners file (CodeOwnersRule, MATCHES, OWNED_BY).
+A commit or pull request is ABOUT the deepest folder holding every file it changed.
 """
 
 import json
+import re
 from pathlib import Path
 
 from . import docgraph
@@ -119,6 +123,167 @@ def map_code(g: Graph, d: Path):
     map_symbols(g, repo, scope, rid, files, sources)
     g.notes["code: files in the tree"] = len(listing)
     g.notes["code: folders in the tree"] = len(folders)
+    texts_all = dict(texts) if listing and all(a is None for _, a in listing) else {}
+    for path, abs_path in listing:  # a checkout: the config files are read from it
+        if abs_path is not None and (path in CODEOWNERS_PATHS or path.startswith(".github/")):
+            texts_all[path] = _read(abs_path)
+    _path_configs(g, repo, scope, files, folders, {p: t for p, t in texts_all.items() if t})
+    _change_folders(g, files, folders)
+
+
+# where the code hosts look for a code-owners file (GitHub and GitLab: the root, .github/ or .gitlab/, docs/)
+CODEOWNERS_PATHS = ("CODEOWNERS", ".github/CODEOWNERS", ".gitlab/CODEOWNERS", "docs/CODEOWNERS")
+LABELER_DEFAULT = ".github/labeler.yml"   # actions/labeler's default configuration-path
+
+
+def glob_rx(pattern: str):
+    """A path glob (minimatch / gitignore style: ** any depth, * and ? within one part, {a,b} alternatives) -> regex."""
+    out, i = "", 0
+    while i < len(pattern):
+        if pattern.startswith("**/", i):
+            out, i = out + "(?:.*/)?", i + 3
+        elif pattern.startswith("**", i):
+            out, i = out + ".*", i + 2
+        elif pattern[i] == "*":
+            out, i = out + "[^/]*", i + 1
+        elif pattern[i] == "?":
+            out, i = out + "[^/]", i + 1
+        elif pattern[i] == "{" and "}" in pattern[i:]:
+            j = pattern.index("}", i)
+            out += "(?:" + "|".join(re.escape(x) for x in pattern[i + 1:j].split(",")) + ")"
+            i = j + 1
+        else:
+            out, i = out + re.escape(pattern[i]), i + 1
+    return re.compile(out + r"\Z")
+
+
+def _targets(pattern, files, folders, anchored=True):
+    """The Folders and Files a path pattern names: "dir/**", "dir/**/*" or "dir/" is that folder (its contents are IN
+    it); any other pattern is the files it matches, and the folders too when it names no extension-like file part."""
+    p = pattern.strip()
+    prefix = "" if anchored else "(?:.*/)?"
+    m = re.fullmatch(r"(.+?)/(?:\*\*(?:/\*)?)?", p)
+    if m and (p.endswith("/") or p.endswith("/**") or p.endswith("/**/*")):
+        rx = re.compile(prefix + glob_rx(m.group(1)).pattern)
+        return [folders[f] for f in folders if rx.match(f)], []
+    rx = re.compile(prefix + glob_rx(p).pattern)
+    hit_files = [files[f] for f in files if rx.match(f)]
+    hit_folders = [folders[f] for f in folders if rx.match(f)] if not anchored or "." not in p.rsplit("/", 1)[-1] else []
+    return hit_folders, hit_files
+
+
+def _strings(node, skip_keys=("head-branch", "base-branch", "branch")):
+    """Every string in a labeler rule, except those under the branch matchers (they name branches, not paths)."""
+    if isinstance(node, str):
+        yield node
+    elif isinstance(node, list):
+        for x in node:
+            yield from _strings(x, skip_keys)
+    elif isinstance(node, dict):
+        for k, v in node.items():
+            if str(k) not in skip_keys:
+                yield from _strings(v, skip_keys)
+
+
+def _path_configs(g, repo, scope, files, folders, texts):
+    """The code host's standard path maps, read from the repository's own files:
+      - a labeler config (actions/labeler: label -> path globs; its path is the configuration-path a workflow passes,
+        else .github/labeler.yml): each Folder or File a label's globs name HAS_LABEL that code Label (the config
+        states the mapping; a negated glob takes its targets out again)
+      - a code-owners file: one CodeOwnersRule per line, MATCHES the folders and files its pattern names, and each
+        of those is OWNED_BY the accounts it names when this line is the last one matching it (source codeowners)."""
+    import yaml
+    label = g.ctx.get("code_labels")
+    configs = set()
+    for path, text in texts.items():
+        if path.startswith(".github/workflows/") and "actions/labeler" in text:
+            try:
+                wf = yaml.safe_load(text) or {}
+            except yaml.YAMLError:
+                continue
+            for job in (wf.get("jobs") or {}).values() if isinstance(wf, dict) else []:
+                for step in (job or {}).get("steps") or []:
+                    if isinstance(step, dict) and str(step.get("uses", "")).startswith("actions/labeler"):
+                        configs.add(str((step.get("with") or {}).get("configuration-path") or LABELER_DEFAULT))
+    if LABELER_DEFAULT in texts:
+        configs.add(LABELER_DEFAULT)
+    for path in sorted(configs):
+        if path not in texts:
+            g.notes["code: labeler config named by a workflow but its text is not local"] += 1
+            continue
+        if label is None:
+            g.notes["code: labeler config with no code host labels to link (no github/ folder)"] += 1
+            continue
+        try:
+            rules = yaml.safe_load(texts[path]) or {}
+        except yaml.YAMLError:
+            g.notes["code: labeler config not readable as YAML"] += 1
+            continue
+        for name, rule in rules.items() if isinstance(rules, dict) else []:
+            keep, drop = set(), set()
+            for glob in _strings(rule):
+                neg = glob.startswith("!")
+                fo, fi = _targets(glob.lstrip("!"), files, folders)
+                (drop if neg else keep).update(r["props"]["_key"] for r in fo + fi)
+            for key in sorted(keep - drop):
+                g.link("HAS_LABEL", g.records[key], label(str(name)), "field", rule_id=f"labeler:{path}")
+                g.notes["code: folders and files carrying a label by the labeler config"] += 1
+    for path in CODEOWNERS_PATHS:
+        if path in texts:
+            _codeowners(g, repo, scope, path, texts[path], files, folders)
+            break  # the code host reads the first one it finds
+
+
+def _codeowners(g, repo, scope, path, text, files, folders):
+    by_login = {a["props"]["login"].casefold(): a for a in g.ctx.get("github_accounts", {}).values()
+                if a["props"].get("login")}
+    owner_of = {}  # target key -> (rule record, owners): the last matching line wins
+    order = 0
+    for line in text.splitlines():
+        line = line.split(" #", 1)[0].strip()
+        if not line or line.startswith("#") or (line.startswith("[") and "]" in line):  # comment, GitLab section
+            continue
+        pattern, *owners = line.split()
+        order += 1
+        rule = g.rec("CodeOwnersRule", "git", f"{repo['props']['native_id']}:{path}:{order}", {
+            "pattern": pattern, "owners": owners, "order": order, "file_location": path}, scope, acl_from=repo)
+        anchored = pattern.startswith("/") or "/" in pattern.rstrip("/")
+        fo, fi = _targets(pattern.lstrip("/"), files, folders, anchored=anchored)
+        for r in fo + fi:
+            g.link("MATCHES", rule, r, "field")
+            owner_of[r["props"]["_key"]] = (rule, owners)
+        g.notes["code: code-owners lines"] += 1
+    for key, (rule, owners) in owner_of.items():
+        rule["props"]["effective"] = True  # it decides ownership of at least one path
+        for o in owners:
+            acct = by_login.get(o.lstrip("@").casefold()) if o.startswith("@") and "/" not in o else None
+            if acct is None:
+                g.notes["code: code owners not linked (a team, an address or an unknown login)"] += 1
+                continue
+            g.link("OWNED_BY", g.records[key], acct, "field", source="codeowners", rule_id=rule["props"]["native_id"])
+
+
+def _change_folders(g, files, folders):
+    """A commit or pull request is ABOUT the folder its changes are confined to: the deepest folder in the tree that
+    holds every file it changed (none when they share only the repository root)."""
+    path_of = {f["id"]: p for p, f in files.items()}
+    changed = {}
+    for lk, ka, _ in g.links.values():
+        if lk["type"] == "CHANGES" and lk["b"] in path_of:
+            changed.setdefault(ka, [lk["props"].get("at"), []])[1].append(path_of[lk["b"]])
+    for ka, (at, paths) in changed.items():
+        parts = [p.split("/")[:-1] for p in paths]
+        common = []
+        for level in zip(*parts):
+            if len(set(level)) != 1:
+                break
+            common.append(level[0])
+        while common and "/".join(common) not in folders:  # a folder no longer in the snapshot: its nearest parent
+            common.pop()
+        if common:
+            g.link("ABOUT", g.records[ka], folders["/".join(common)], "inferred", 1.0, derived=True,
+                   rule_id="derive:change_confined_to_folder", kind="changed_folder", valid_from=at)
+            g.notes["code: changes ABOUT the folder they are confined to"] += 1
 
 
 def _doc(g, f, rid, path, source, scope, note):

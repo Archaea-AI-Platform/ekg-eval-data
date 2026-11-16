@@ -30,6 +30,7 @@ A mapping that is rejected (shape none, or it fails the checks) or whose call fa
 
 from __future__ import annotations
 
+import asyncio
 import collections
 import hashlib
 import json
@@ -45,14 +46,16 @@ SHAPES = ["rows", "key_value", "none"]
 MAX_PARTS = 3   # values one composite cell may hold ("Lionel 42", "#174 / pay-auth")
 MAPPING_RETRIES = 1   # a mapping a code check rejects is asked again this many times, with the reason
 ASK = ("This is one table: its heading, its header and a sample of its {rows:,} rows (all of them when it is short). "
-       "Say how to read it, so that code can read every row the same way.\n"
+       "Say how to read its COLUMNS, so that code can read every row the same way. Your reply describes columns: it "
+       "never lists rows or copies cell values, so it is short whatever the table's length.\n"
        "{catalog}\n\n"
        "RULES\n"
-       "- shape: \"rows\" when each row is one record (a person, a team, a service ...) or one relation between records "
-       "(an event, an assignment, a count per person and module). \"key_value\" when the whole table describes ONE record "
-       "and each ROW is one of its fields or links: a label in the first column, its value in the second (Owner | ..., "
-       "Status | ...). \"none\" when the rows are not records or relations of a listed type (figures, a layout table, a "
-       "glossary): the table is then read as ordinary text.\n"
+       "- shape: \"rows\" when each row is one record of a listed type or one relation between records (an event, an "
+       "assignment, a contact per area, a count per person and module): some column names records of a listed type. "
+       "\"key_value\" when the whole table describes ONE record and each ROW is one of its fields or links: a label in "
+       "the first column, its value in the second (Owner | ..., Status | ...). \"none\" only when no column names records "
+       "of a listed type (figures, a layout table, terms and their meanings): the table is then read as ordinary text. "
+       "Decide by the descriptions of the types above, not by how the table looks.\n"
        "- row_type: for \"rows\", the record type each row is about (for a relation, the record at one end: the person "
        "of \"module | person | commits\"). A table that is an export of another tool (a commit log, a merge log) has rows "
        "of that tool's type (listed under RECORD TYPES OF OTHER TOOLS). For \"key_value\", the type of the one record. "
@@ -74,20 +77,33 @@ ASK = ("This is one table: its heading, its header and a sample of its {rows:,} 
        "- statement_column: for a type \"stated in\" a field (a decision, a piece of knowledge, a requirement ...), the "
        "column holding that statement, else \"none\".\n"
        "- fields: a column that holds one of row_type's listed fields: the column and that field's name.\n"
-       "- links: a column whose cells name ANOTHER record the row's record is linked to: the column, the link type, the "
-       "other record's type, and row_is: \"from\" when the link goes row -> other, \"to\" when it goes other -> row. split: "
-       "the separator when one cell lists several (\",\", \";\", \"/\", \"space\"), else \"none\". fields: the columns that "
-       "hold a value OF THAT LINK (a date, a count, a role), each with the link's field name as listed for the link type.\n"
+       "- links: one entry for every column (or column part) whose cells name ANOTHER record: the column, the link type, "
+       "the other record's type, and row_is: \"from\" when the link goes near end -> other, \"to\" when it goes other -> "
+       "near end. The near end is the row's own record (from_column \"row\"), or the record another column of the same "
+       "row names (from_column: that column, which has a links entry of its own): a row can state several links, also "
+       "between two of its other columns' records (a commit's pull request and the file it changed, a module's "
+       "repository and its file). Use the link type whose description says what the table states, in the direction "
+       "the description gives. other_key_field: when the cells hold the other record's key rather than its name (a "
+       "pull request's number, a commit's sha, a file's path), that field of other_type, else \"none\". split: the "
+       "separator when one cell lists several (\",\", \";\", \"/\", \"space\"), else \"none\". fields: the columns that "
+       "hold a value OF THAT LINK (a date, a count, a role), each with the link's field name as listed for the link type. "
+       "Every column part that names a record gets a links entry, so that nothing a row says is left unlinked.\n"
+       "- schema_gap: when a column states something that no listed link or field can hold (for example a count per "
+       "person and module when no fitting link has a count field), one sentence saying what, in which columns, and "
+       "which link is missing; else \"\". Code reports it, and reads such a table as text as well.\n"
        "SHAPE key_value:\n"
        "- entity_name: the one record's name, copied from the table, its heading or the document title.\n"
        "- label_fields: a row label (the row's first cell, as written) whose value is a field of that record, and the field.\n"
        "- label_links: a row label whose value names another record linked to it: the label, the link type, the other "
        "record's type, row_is (\"from\" when the link goes the record -> other), split.\n"
        "- For the shape you do not use, give empty lists, \"none\" and an empty entity_name.\n"
-       "- Map a column or a label only when the table makes its meaning plain. Leave the others out (code counts them).\n"
+       "- Map a column or a label only when the table makes its meaning plain. Leave the others out (code counts them, "
+       "and a table with columns no mapping reads is read as text too).\n"
+       "- Each list has at most one entry per column, part or label; reason is one sentence.\n"
        'Reply with one JSON object: {{"shape", "row_type", "cell_parts": [{{"column", "parts", "separator", "pattern"}}], '
        '"name_column", "key_column", "key_field", "statement_column", "fields": [{{"column", "field"}}], '
-       '"links": [{{"column", "link", "other_type", "row_is", "split", "fields": [{{"column", "field"}}]}}], '
+       '"links": [{{"column", "link", "other_type", "row_is", "from_column", "other_key_field", "split", '
+       '"fields": [{{"column", "field"}}]}}], "schema_gap", '
        '"entity_name", "label_fields": [{{"label", "field"}}], '
        '"label_links": [{{"label", "link", "other_type", "row_is", "split"}}], "reason"}}. Columns are named c1, c2 ...')
 
@@ -97,7 +113,7 @@ def build(v):
     piece a task reads is claimed (v.claimed): the reading tasks leave it out unless its mapping is not accepted."""
     cat = v.catalog()
     docs, _ = v.docs()
-    v.overhead.setdefault("table_map", extract_facts.overhead(cat))
+    v.overhead.setdefault("table_map", overhead(cat, v.budget))
     room = v.room("table_map")
     tasks, skipped = [], collections.Counter()
     for doc in docs:
@@ -127,9 +143,22 @@ def build(v):
     return tasks, skipped
 
 
+def catalog_text(catalog, budget=None):
+    """The table prompt's schema section with as many of the registry's descriptions as the budget allows
+    (Catalog.schema_text); returns (text, info)."""
+    from . import fill
+    return catalog.schema_text("tables", (budget or getattr(catalog, "budget", None) or fill.BUDGET).schema_chars)
+
+
+def overhead(catalog, budget=None) -> int:
+    """Characters of a table_map prompt that are not the table: header, schema, rules and reply format."""
+    from .fill import HEADER
+    return len(HEADER) + len(ASK.format(rows=0, catalog=catalog_text(catalog, budget)[0])) + 600
+
+
 def prompt(t: Task, catalog):
     from .fill import HEADER, _text_block
-    return "\n".join([HEADER, ""] + _text_block(t) + ["", ASK.format(rows=t.write["rows"], catalog=catalog.describe_tables())])
+    return "\n".join([HEADER, ""] + _text_block(t) + ["", ASK.format(rows=t.write["rows"], catalog=catalog_text(catalog)[0])])
 
 
 def schema(catalog, n_columns):
@@ -146,6 +175,8 @@ def schema(catalog, n_columns):
                  "other_type": {"type": "string", "enum": types}, "row_is": {"type": "string", "enum": ["from", "to"]},
                  "split": {"type": "string", "enum": list(SPLITS)}}
         if with_fields:
+            props["from_column"] = {"type": "string", "enum": ["row"] + cols}
+            props["other_key_field"] = {"type": "string"}
             props["fields"] = {"type": "array", "items": pair("column")}
         return {"type": "object", "additionalProperties": False, "required": list(props), "properties": props}
 
@@ -161,6 +192,7 @@ def schema(catalog, n_columns):
              "statement_column": {"type": "string", "enum": cols + ["none"]},
              "fields": {"type": "array", "items": pair("column")},
              "links": {"type": "array", "items": link("column", True)},
+             "schema_gap": {"type": "string"},
              "entity_name": {"type": "string"},
              "label_fields": {"type": "array", "items": pair("label")},
              "label_links": {"type": "array", "items": link("label", False)},
@@ -222,6 +254,10 @@ def check(t: Task, ans, catalog):
         if isinstance(c, str) and re.fullmatch(r"c[1-9]\d*", c) and int(c[1:]) <= n:
             return int(c[1:]) - 1
         return virtual.get(c)
+    width = n + len(virtual)   # columns and column parts: no list of a mapping names more entries than that
+    if any(len(ans.get(k) or []) > width for k in ("fields", "links", "cell_parts")):
+        return {"status": "rejected", "reason": "check: the mapping lists more entries than the table has columns (a mapping "
+                "names columns, never rows)", "dropped": dict(dropped)}
     name_col, key_col = col(ans.get("name_column")), col(ans.get("key_column"))
     key_field = ans.get("key_field") if key_col is not None and ans.get("key_field") not in (None, "", "none") else None
     if key_field is not None and key_field not in catalog.key_fields(rtype):
@@ -245,15 +281,39 @@ def check(t: Task, ans, catalog):
     if name_col is None and nf in used:   # the name given as a field mapping
         name_col = next(c for c, f in fields if f == nf)
     fields = [[c, f] for c, f in fields if f != nf]
-    for x in ans.get("links") or []:
-        c = col(x.get("column")) if isinstance(x, dict) else None
+    raw_links = [x for x in ans.get("links") or [] if isinstance(x, dict)]
+    # the record type each link column names, so that another link can start at it (from_column)
+    named_by = {}
+    for x in raw_links:
+        c = col(x.get("column"))
+        if c is not None and x.get("other_type") in reg.records:
+            named_by.setdefault(c, x.get("other_type"))
+    # links from the row first: a link that starts at another column's record is written after that column's own
+    for x in sorted(raw_links, key=lambda x: (x.get("from_column") or "row") != "row"):
+        c = col(x.get("column"))
         if c is None:
             dropped["mapping: column that is not in the table"] += 1
             continue
-        got = _link_ok(reg, catalog, x, rtype, dropped)
+        near_col = None
+        if (x.get("from_column") or "row") not in ("row", "none"):
+            near_col = col(x.get("from_column"))
+            if near_col == c:   # a link cannot start at its own cell: the column named itself, so the near end is the row
+                dropped["mapping: from_column named the link's own column, read as the row"] += 1
+                near_col = None
+            elif near_col is None or near_col not in named_by:
+                dropped["mapping: from_column names no other column with a record type of its own"] += 1
+                continue
+            if near_col in (name_col, key_col):   # the row's own name or key: the row itself
+                near_col = None
+        near_type = rtype if near_col is None else named_by[near_col]
+        got = _link_ok(reg, catalog, x, near_type, dropped)
         if got is None:
             continue
         ltype, other, fwd = got
+        other_key = x.get("other_key_field") if x.get("other_key_field") not in (None, "", "none") else None
+        if other_key is not None and other_key not in catalog.key_fields(other):
+            dropped[f"mapping: {other_key} is not a key field of {other} (a plain text or number field)"] += 1
+            other_key = None
         own, offered_own = [], catalog.link_value_fields(ltype)
         for f in x.get("fields") or []:
             fc = col(f.get("column")) if isinstance(f, dict) else None
@@ -265,7 +325,8 @@ def check(t: Task, ans, catalog):
                 dropped[f"mapping: link field {f['field']} mapped twice"] += 1
             else:
                 own.append([fc, f["field"]])
-        links.append({"column": c, "link": ltype, "other": other, "row_from": fwd, "fields": own,
+        links.append({"column": c, "link": ltype, "other": other, "row_from": fwd, "fields": own, "near": near_col,
+                      "near_type": near_type, "other_key": other_key,
                       "split": x.get("split") if x.get("split") in SPLITS else "none"})
     if name_col is None and key_col is None and not (tf and tf in used):
         return {"status": "rejected", "reason": "check: mapping names no column for the row's name, key or statement", "dropped": dict(dropped)}
@@ -282,10 +343,25 @@ def check(t: Task, ans, catalog):
             if cells and all(_more_than_a_name(x) for x in cells):
                 return {"status": "rejected", "reason": f"check: column {_col_name(c, n, parts)} names a {ty} but every sample cell holds "
                         f"more than a name (\"{cells[0][:40]}\"): split it with cell_parts", "dropped": dict(dropped)}
-    return {"status": "accepted", "mapping": {"shape": "rows", "row_type": rtype, "name": name_col, "key": key_col,
-                                              "key_field": key_field, "parts": parts, "fields": fields, "links": links,
-                                              "identifying": _identifying(catalog, rtype, name_col, key_col, fields, links)},
-            "reason": (ans.get("reason") or "")[:300], "dropped": dict(dropped)}
+    m = {"shape": "rows", "row_type": rtype, "name": name_col, "key": key_col, "key_field": key_field, "parts": parts,
+         "fields": fields, "links": links, "identifying": _identifying(catalog, rtype, name_col, key_col, fields, links)}
+    unread = [_col_name(i, n, parts) for i in unread_columns(m, n) if any(i < len(row) and row[i] for row in sample)]
+    gap = (ans.get("schema_gap") or "").strip()
+    if unread or gap:   # what the mapping does not read is read as text as well, so that nothing a cell says is lost
+        m["also_text"] = {"unread_columns": unread, **({"schema_gap": gap[:300]} if gap else {})}
+    return {"status": "accepted", "mapping": m, "reason": (ans.get("reason") or "")[:300], "dropped": dict(dropped),
+            **({"schema_gap": gap[:300]} if gap else {})}
+
+
+def unread_columns(m, n):
+    """The columns (and column parts) of a rows mapping that nothing reads: no name, key, field or link, and no
+    link field. A split column is read by its parts."""
+    parts = m.get("parts") or []
+    width = n + sum(p[1] for p in parts)
+    read = {m["name"], m["key"], *(i for i, _ in m["fields"]), *(l["column"] for l in m["links"]),
+            *(i for l in m["links"] for i, _ in l.get("fields", []))}
+    split_cols = {p[0] for p in parts}
+    return [i for i in range(width) if i not in read and i not in split_cols]
 
 
 def _check_key_value(t, ans, catalog, rtype, offered, nf, dropped):
@@ -335,18 +411,53 @@ def reachable(reg, ltype, rtype, other, forward):
     return any(reg.link_allows(ltype, a, b) if forward else reg.link_allows(ltype, b, a) for a in rows for b in others)
 
 
+def too_long(ans, budget=None):
+    """Why a mapping reply is a failed mapping by its size alone, or None. A mapping names columns, never rows, so
+    its reply is small by construction: one that ran into the reply limit, or took more tokens (thinking included)
+    than Budget.mapping_reply_tokens, went round in circles. Such a table is read as text, and the verdict stands
+    (a rejection, not an error asked again next run)."""
+    from . import fill
+    limit = (budget or fill.BUDGET).mapping_reply_tokens
+    if isinstance(ans, dict) and "error" in ans and re.search(r"window full|cut off|reply limit|ran away", str(ans["error"]), re.I):
+        return f"the reply ran into the limit ({str(ans['error'])[:120]})"
+    used = ((ans or {}).get("_usage") or {}).get("completion_tokens") if isinstance(ans, dict) else None
+    if isinstance(used, (int, float)) and used > limit:
+        return f"the reply took {int(used):,} tokens, over the {limit:,} a mapping may take"
+    return None
+
+
+async def _ask_bounded(ask, prompt, sch, catalog):
+    """One mapping call, bounded in time as well as in tokens: the reply cannot be capped per call (no call passes
+    max_tokens), so a reply still running after Budget.mapping_seconds (the token guard at a slow model's pace) is
+    given up as one gone round in circles. On ACME v5 one such call ran 11 minutes after the other 14 were done."""
+    from . import fill
+    budget = getattr(catalog, "budget", None) or fill.BUDGET
+    try:
+        return await asyncio.wait_for(ask(prompt, "ekg_table_map", sch), timeout=budget.mapping_seconds)
+    except asyncio.TimeoutError:
+        return {"error": f"reply ran away: no answer after {budget.mapping_seconds:,} seconds"}
+
+
 async def settle(t: Task, ask, catalog):
     """Ask for the mapping and check it. A mapping a code check rejects (a split that does not parse, a composite
-    used as a name ...) is asked again once, with the reason, before the table is left to be read as text."""
+    used as a name ...) is asked again once, with the reason, before the table is left to be read as text. A reply
+    too long for a mapping (too_long) is rejected at once: the table is read as text."""
     sch = schema(catalog, len(t.write["table"].header))
     first = prompt(t, catalog)
-    e = check(t, await ask(first, "ekg_table_map", sch), catalog)
+    ans = await _ask_bounded(ask, first, sch, catalog)
+    if (why := too_long(ans)):
+        return {"status": "rejected", "reason": f"check: mapping reply too long: {why}", "usage": (ans or {}).get("_usage")}
+    e = check(t, ans, catalog)
     for _ in range(MAPPING_RETRIES):
         if e["status"] != "rejected" or not e["reason"].startswith("check:"):
             break
-        again = check(t, await ask(f"{first}\n\nAN EARLIER MAPPING OF THIS TABLE WAS REJECTED ({e['reason'][7:]}). "
-                                     "Give a corrected mapping.", "ekg_table_map", sch), catalog)
-        e = {**again, "retried_after": e["reason"][:200]}
+        ans = await _ask_bounded(ask, f"{first}\n\nAN EARLIER MAPPING OF THIS TABLE WAS REJECTED ({e['reason'][7:]}). "
+                                 "Give a corrected mapping.", sch, catalog)
+        if (why := too_long(ans)):
+            return {"status": "rejected", "reason": f"check: mapping reply too long: {why}", "retried_after": e["reason"][:200]}
+        e = {**check(t, ans, catalog), "retried_after": e["reason"][:200]}
+    if isinstance(ans, dict) and ans.get("_usage"):
+        e["usage"] = ans["_usage"]
     return e
 
 
@@ -384,7 +495,7 @@ def split_cell(raw, part):
     cell does not split that way. An empty cell -> empty values."""
     _, n, sep, pattern = part
     raw = (raw or "").strip()
-    if not raw:
+    if placeholder(raw):   # an empty cell, or one that stands for nothing ("-", "—", "n/a"): no values, not a bad split
         return [""] * n
     if pattern:
         m = re.fullmatch(pattern, raw)
@@ -393,6 +504,21 @@ def split_cell(raw, part):
         got = [x.strip() for x in raw.split(sep, n - 1)] if sep else None
         got = got if got and len(got) == n else None
     return got if got and all(got) else None
+
+
+def _pattern_separator(pattern, count):
+    r"""The one plain text a pattern writes between each of its groups (" / " in "#(\d+) / (\w+)"), or None when the
+    texts between groups differ or hold anything but literal characters."""
+    if count < 2:
+        return None
+    between = re.split(r"\((?:\\.|[^()\\])*\)", pattern)
+    if len(between) != count + 1:
+        return None
+    mids = {re.sub(r"\\(.)", r"\1", b) for b in between[1:-1]}
+    if len(mids) != 1:
+        return None
+    lit = mids.pop()
+    return lit if lit.strip() and not re.search(r"[\\.*+?\[\]{}|^$]", lit) else None
 
 
 def _cell_parts(t, specs, n):
@@ -415,6 +541,12 @@ def _cell_parts(t, specs, n):
                 return [], {}, f"the pattern for {c} is not a regular expression ({ex})"
         part = [i, count, sep, pattern]
         bad = next((row[i] for row in sample if i < len(row) and split_cell(row[i], part) is None), None)
+        if bad is not None and pattern and (lit := _pattern_separator(pattern, count)):
+            # the pattern's own text between its groups, used as the separator: "#(\d+) / (\w+)" fails on
+            # "#174 / PAY-AUTH" only because \w has no dash; " / " splits every sample row
+            alt = [i, count, lit, ""]
+            if all(split_cell(row[i], alt) is not None for row in sample if i < len(row)):
+                part, bad = alt, None
         if bad is not None:
             return [], {}, f"the split of {c} does not parse the sample row cell \"{bad[:60]}\""
         for k in range(count):
@@ -533,8 +665,37 @@ def apply(w, t: Task, e):
         if got[1]:
             props[f"{f}_precision"] = got[1]
 
-    def link(l, rec, raw, unit, own_cells):
-        """Every value of one link cell, linked to `rec`, with the link's own fields from `own_cells`."""
+    def ends(l, raw, unit, what):
+        """The records one link cell names (every value of it, cut by the mapping's split): found by the other
+        type's key field when the mapping gives one (a pull request's number, a file's path), else by name, else
+        created like a row's record. A cell names the other record; whose record it is (an account, an address)
+        never turns into its person (same_kind for identity links)."""
+        out = []
+        ty, key_field = l["other"], l.get("other_key")
+        onf = cat.name_field(ty)
+        for val in values(raw, l["split"]):
+            if placeholder(val):
+                c["placeholder cell (-, n/a ...): no link end, left out"] += 1
+                continue
+            props = {onf: val.lstrip("@")} if onf else {}
+            if key_field:
+                got = coerce(reg.record(ty).fields[key_field], val.lstrip("@")) if key_field in reg.record(ty).fields else None
+                if got is None:
+                    c[f"{what}: the cell is not a {ty} {key_field}"] += 1
+                    continue
+                props = {key_field: got[0]} if key_field != onf else {onf: got[0]}
+            if not props:
+                c[f"{what}: {ty} has no field to name it by"] += 1
+                continue
+            other, why = obtain(ty, val, val, props, unit, what, key_field=key_field, create=True,
+                                same_kind=l["link"] in v._identity)
+            if why:
+                c[why] += 1
+                continue
+            out.append(other)
+        return out
+
+    def own_values(l, own_cells):
         own = {}
         lspec = reg.link(l["link"]).fields
         for f, raw_own in own_cells:
@@ -544,20 +705,14 @@ def apply(w, t: Task, e):
                     c[f"cell skipped: link field {l['link']}.{f} value does not fit its type"] += 1
                 continue
             own[f] = got[0]
-        for val in values(raw, l["split"]):
-            ltype, other_type = l["link"], l["other"]
-            if placeholder(val):
-                c["placeholder cell (-, n/a ...): no link end, left out"] += 1
-                continue
-            onf = cat.name_field(other_type)
-            # an identity link (a person's account, an address) states whose record it is: the other end may be
-            # made from the table when the graph has none (a later connector finds it by the same name / login)
-            other, why = obtain(other_type, val, val, {onf: val.lstrip("@") if onf else val} if onf else {}, unit,
-                                f"{ltype} skipped", create=bool(onf) and l["link"] in v._identity,
-                                same_kind=l["link"] in v._identity)   # the account itself, never its person
-            if why:
-                c[why] += 1
-                continue
+        return own
+
+    def link(l, rec, raw, unit, own_cells, others=None):
+        """Every value of one link cell, linked to `rec` (the row's record, or the record another cell of the row
+        names), with the link's own fields from `own_cells`."""
+        own = own_values(l, own_cells)
+        ltype = l["link"]
+        for other in (ends(l, raw, unit, f"{ltype} skipped") if others is None else others):
             a, b = (rec, other) if l["row_from"] else (other, rec)
             if not reg.link_allows(ltype, a["type"], b["type"]):
                 lk = reg.link(ltype)
@@ -580,10 +735,7 @@ def apply(w, t: Task, e):
     # every non-empty cell of a column the mapping does not read is counted, never dropped silently
     parts, key_field = m.get("parts") or [], m.get("key_field")
     heads = list(tb.header) + [f"{tb.header[p[0]]} (part {k + 1})" for p in parts for k in range(p[1])]
-    read = {m["name"], m["key"], *(i for i, _ in m["fields"]), *(l["column"] for l in m["links"]),
-            *(i for l in m["links"] for i, _ in l.get("fields", []))}
-    split_cols = {p[0] for p in parts}
-    unread = [i for i in range(len(heads)) if i not in read and i not in split_cols]   # a split column is read by its parts
+    unread = unread_columns(m, len(tb.header))
     # pass 1: every row's own record, so that a later column can name a row further down (a manager)
     rows = []
     for unit, cells in tb.rows():
@@ -625,13 +777,39 @@ def apply(w, t: Task, e):
         c["table rows written"] += 1
         mention(unit, rec)
         rows.append((unit, cells, rec))
-    # pass 2: the link columns, each with the values of its own fields
-    for unit, cells, rec in rows:
-        for l in m["links"]:
-            raw = cell(cells, l["column"])
-            if raw:
-                link(l, rec, raw, unit, [(f, cell(cells, i)) for i, f in l.get("fields", [])])
-    return None
+    # pass 2: the link columns, each with the values of its own fields. A link may start at the record another
+    # cell of the row names (near): that cell is resolved once per row, as its own link column resolves it
+    def links_pass():
+        for unit, cells, rec in rows:
+            named = {}   # (column, type, key field) -> the records that cell names, resolved once per row
+
+            def cell_ends(i, ty, key_field, split, ltype):
+                k = (i, ty, key_field)
+                if k not in named:
+                    raw = cell(cells, i)
+                    named[k] = ends({"other": ty, "other_key": key_field, "split": split, "link": ltype}, raw, unit,
+                                    f"{ltype} skipped") if raw else []
+                return named[k]
+            for l in m["links"]:
+                if not cell(cells, l["column"]):
+                    continue
+                others = cell_ends(l["column"], l["other"], l.get("other_key"), l["split"], l["link"])
+                own = [(f, cell(cells, i)) for i, f in l.get("fields", [])]
+                if l.get("near") is None:
+                    link(l, rec, None, unit, own, others)
+                    continue
+                spec = next((x for x in m["links"] if x["column"] == l["near"]), None)
+                nears = cell_ends(l["near"], l["near_type"], spec.get("other_key") if spec else None,
+                                  spec["split"] if spec else "none", spec["link"] if spec else l["link"])
+                if not nears:
+                    c[f"{l['link']} skipped: the cell its near end is in names no record"] += 1
+                for near in nears:
+                    link(l, near, None, unit, own, others)
+        return None
+    if getattr(w, "defer_table_links", False):   # fill.run: every table's rows first, then every table's links
+        w.table_links.append(links_pass)
+        return None
+    return links_pass()
 
 
 def _apply_key_value(w, t, m, tb, cat, c, obtain, mention, put, link, nf):

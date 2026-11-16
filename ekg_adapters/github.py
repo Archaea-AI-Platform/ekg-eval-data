@@ -2,7 +2,10 @@
 labels (dated from the timeline), review requests, changed files, CI workflows and runs, tags.
 
 APPROVED_BY is derived from the reviews (derived, with a rule id) and marked stale
-when a commit landed after the approval. References queued for the linker: ticket
+when a commit landed after the approval. The owner organisation is a Workspace the Repository is IN; an app the
+source names (performed_via_github_app) is an App, and a bot account is BOT_OF it (the bot posted through it, or
+its login is the app's "<slug>[bot]"); every actor the timeline names is linked by what they did (ACTED_BY,
+ASSIGNED_TO, SUBSCRIBED, MENTIONS); a commit's committer account is AUTHORED_BY role committer. References queued for the linker: ticket
 keys and decision keys (settings) in PR titles, ticket keys in branch names, and "Fixes #n" in descriptions.
 """
 
@@ -29,16 +32,51 @@ def map_github(g: Graph, d: Path, repo_name: str):
                  "default_branch": repo_json.get("default_branch")}, scope)
     g.link("GOVERNED_BY", repo, access, "snapshot")
     g.ctx["repo"] = repo
+    # the organisation that owns the repository (the code host's owner object says whether it is one): a Workspace
+    owner = repo_json.get("owner") or {}
+    if owner.get("type") == "Organization" and owner.get("id"):
+        ws = g.rec("Workspace", "github", owner["id"], {"name": owner.get("login"), "handle": owner.get("login"),
+                   "kind": "code"}, scope)
+        g.link("IN", repo, ws, "field", valid_from=utc(repo_json.get("created_at")))
+        g.ctx["github_workspace"] = ws
+    elif owner:
+        g.notes["github: repository owned by a user, not an organisation (no Workspace)"] += 1
 
     accounts = g.ctx.setdefault("github_accounts", {})
+    apps, app_slugs, logins = {}, {}, {}  # app id -> App; app slug -> App; account id -> every login it was seen under
 
     def account(u):
-        if not u:
+        if not u or not u.get("id"):
             return None
         if u["id"] not in accounts:
             accounts[u["id"]] = g.rec("Account", "github", u["id"], {"login": u["login"], "status": "active",
-                                      "is_bot": u.get("type") == "Bot", "tool": "github"}, scope)
-        return accounts[u["id"]]
+                                      "is_bot": u.get("type") == "Bot" if u.get("type") else None, "tool": "github"},
+                                      scope)
+        acct = accounts[u["id"]]
+        if u.get("type") and acct["props"].get("is_bot") is None:  # first made from a noreply address: now the type is known
+            acct["props"]["is_bot"] = u["type"] == "Bot"
+        if u.get("login"):
+            logins.setdefault(u["id"], set()).add(u["login"])
+        if u.get("login") and u["login"] != acct["props"].get("login"):
+            # the same account under a second login (a bot shown by its app's name in one API, by its own in another)
+            al = g.rec("Alias", "github", f"login:{u['login'].casefold()}", {"value": u["login"], "kind": "login",
+                       "namespace": "github", "normalized_value": u["login"].casefold()}, scope)
+            g.link("ALIAS_OF", al, acct, "field")
+        return acct
+
+    def acted_via_app(item_user, app):
+        """An item a GitHub App posted (the source's performed_via_github_app): the App, and, when the item's author
+        is a bot account, that account is the app's bot (BOT_OF)."""
+        if not app or not app.get("id"):
+            return None
+        if app["id"] not in apps:
+            apps[app["id"]] = g.rec("App", "github", f"app:{app['id']}", {"name": app.get("name") or app.get("slug")}, scope)
+            g.link("IN", apps[app["id"]], repo, "field")
+            if app.get("slug"):
+                app_slugs[app["slug"].casefold()] = apps[app["id"]]
+        if item_user and item_user.get("type") == "Bot":
+            g.link("BOT_OF", account(item_user), apps[app["id"]], "field")
+        return apps[app["id"]]
 
     # who may read a private repo: its collaborators (GET /repos/{repo}/collaborators), level from their role
     if (d / "github/collaborators.json").exists():
@@ -73,6 +111,7 @@ def map_github(g: Graph, d: Path, repo_name: str):
     for lb in J(d / "github/labels.json") if (d / "github/labels.json").exists() else []:
         if lb.get("name"):
             label(lb["name"])
+    g.ctx["code_labels"] = label  # the code tree's labeler config names labels by name (code.py)
     milestones = {}
     for ms in J(d / "github/milestones.json") if (d / "github/milestones.json").exists() else []:
         milestones[ms["number"]] = g.rec("Milestone", "github", ms["id"], {"name": ms.get("title"),
@@ -191,6 +230,7 @@ def map_github(g: Graph, d: Path, repo_name: str):
             g.link("AUTHORED_BY", cm, account(c["user"]), "field", role="author", at=at)
             if c["user"]["type"] == "Bot":
                 g.notes["github: bot comments (CI notices, kept but marked by the bot author)"] += 1
+            acted_via_app(c["user"], c.get("performed_via_github_app"))
         # the PR's own commits (head commits, mostly not on the default branch): referenced by sha for the linker
         for pos, c in enumerate(x.get("commits") or []):
             # the PR's own commits (mostly on its branch, not on the default branch): records of their own, so the PR's commit
@@ -204,10 +244,27 @@ def map_github(g: Graph, d: Path, repo_name: str):
                 if c.get("author"):
                     g.link("AUTHORED_BY", commits[c["sha"]], account(c["author"]), "field", role="author",
                            at=utc((inner.get("author") or {}).get("date")))
+                if c.get("committer"):  # who recorded the commit, as the code host names its account
+                    g.link("AUTHORED_BY", commits[c["sha"]], account(c["committer"]), "field", role="committer",
+                           at=utc((inner.get("committer") or {}).get("date")))
             g.ref(pr, "CONTAINS", "Commit", c["sha"], "field", position=pos, valid_from=created)
+        dated = _actors(g, pr, timeline, account, acted_via_app)
+        for u in p.get("assignees") or ([p["assignee"]] if p.get("assignee") else []):
+            if u and u.get("id") not in dated:  # assigned now, with no assignment event in the timeline
+                g.link("ASSIGNED_TO", pr, account(u), "snapshot")
 
     _ci(g, d, repo, scope, account)
     _tags(g, d, repo, scope)
+    # the code host names an app's bot user "<app slug>[bot]": a bot account seen under that login is the app's bot,
+    # even where no item it posted names the app
+    for uid, names in logins.items():
+        acct = accounts.get(uid)
+        if not acct or not acct["props"].get("is_bot"):
+            continue
+        for name in sorted(names):
+            app = app_slugs.get(name.casefold().removesuffix("[bot]")) if name.casefold().endswith("[bot]") else None
+            if app is not None:
+                g.link("BOT_OF", acct, app, "convention", 0.95)
 
 
 def _labels(g, pr, timeline, p, label, created):
@@ -222,6 +279,45 @@ def _labels(g, pr, timeline, p, label, created):
     for lb in p.get("labels") or []:
         g.link("HAS_LABEL", pr, label(lb["name"]), "event" if lb["name"] in open_at else "snapshot",
                valid_from=open_at.get(lb["name"]))
+
+
+# timeline events whose actor acted on the pull request itself -> ACTED_BY's action (the event name is the link's kind)
+ACTS = {"closed": "close", "reopened": "modify", "labeled": "triage", "unlabeled": "triage", "renamed": "modify",
+        "ready_for_review": "modify", "convert_to_draft": "modify", "base_ref_changed": "modify",
+        "head_ref_deleted": "modify", "head_ref_force_pushed": "push", "review_dismissed": "dismiss",
+        "copilot_work_started": "start"}
+
+
+def _actors(g, pr, timeline, account, acted_via_app):
+    """Everyone the timeline names, linked by what they did: an act on the PR (ACTED_BY, kind = the event), an
+    assignment (ASSIGNED_TO, dated), a subscription (SUBSCRIBED, dated) and a mention (MENTIONS). Commits, comments,
+    reviews, review requests and the merge are linked from their own records, not again here."""
+    assigned, subscribed = {}, {}
+    for e in timeline:
+        ev, at, who = e.get("event"), utc(e.get("created_at")), e.get("actor")
+        acted_via_app(e.get("actor") or e.get("user"), e.get("performed_via_github_app"))
+        if ev in ACTS and who:
+            g.link("ACTED_BY", pr, account(who), "event", role="closer" if ev == "closed" else "actor", action=ACTS[ev],
+                   kind=ev, at=at, forced=True if ev == "head_ref_force_pushed" else None)
+        elif ev == "assigned" and e.get("assignee"):
+            assigned[e["assignee"]["id"]] = (e["assignee"], at)
+        elif ev == "unassigned" and e.get("assignee") and e["assignee"]["id"] in assigned:
+            u, since = assigned.pop(e["assignee"]["id"])
+            if at and since and at > since:
+                g.link("ASSIGNED_TO", pr, account(u), "event", valid_from=since, valid_to=at)
+        elif ev == "subscribed" and who:
+            subscribed[who["id"]] = (who, at)
+        elif ev == "unsubscribed" and who and who["id"] in subscribed:
+            u, since = subscribed.pop(who["id"])
+            if at and since and at > since:
+                g.link("SUBSCRIBED", account(u), pr, "event", valid_from=since, valid_to=at)
+        elif ev == "mentioned" and who:
+            g.link("MENTIONS", pr, account(who), "event", at=at, kind="mention")
+    for u, since in assigned.values():
+        g.link("ASSIGNED_TO", pr, account(u), "event", valid_from=since)
+    for u, since in subscribed.values():
+        g.link("SUBSCRIBED", account(u), pr, "event", valid_from=since)
+    return {u["id"] for u, _ in assigned.values()}
 
 
 def _review_requests(g, pr, timeline, reviews, account, ended):
@@ -256,6 +352,10 @@ def _ci(g, d, repo, scope, account):
         if r.get("actor"):
             g.link("ACTED_BY", run, account(r["actor"]), "field", role="initiator", action="start",
                    at=utc(r.get("run_started_at") or r["created_at"]))
+        trig = r.get("triggering_actor")
+        if trig and trig.get("id") != (r.get("actor") or {}).get("id"):  # a re-run started by someone else
+            g.link("ACTED_BY", run, account(trig), "field", role="actor", action="rerun", kind="rerun",
+                   at=utc(r.get("run_started_at") or r["created_at"]), attempt=r.get("run_attempt"))
         g.ref(run, "POINTS_TO", "Commit", r["head_sha"], "field")
     with_jobs = 0
     for f in sorted((d / "github/run_jobs").glob("*.json")) if (d / "github/run_jobs").is_dir() else []:

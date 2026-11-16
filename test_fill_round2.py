@@ -227,8 +227,10 @@ def tool_table_checks(check):
     check("tool tables: AUTHORED_BY goes to the author's Account; APPROVED_BY needs an Account, so a Person is followed to their one account",
           (pr174["id"], acct["lionel"]["id"]) in L["AUTHORED_BY"] and (pr174["id"], acct["suzan"]["id"]) in L["APPROVED_BY"]
           and (prs[181]["id"], acct["emma"]["id"]) in L["APPROVED_BY"] and (prs[181]["id"], acct["suzan"]["id"]) in L["APPROVED_BY"])
-    check("tool tables: an end that cannot be resolved (no Account 'noahp', Maya with no account) is counted, not dropped",
-          c.get("AUTHORED_BY skipped: no such Account in the graph (not a type created from a document)") == 1
+    check("tool tables: a link end the graph lacks is made from the table like a row (Account 'noahp'), counted; "
+          "Maya, a Person with no account, cannot be an APPROVED_BY end: counted, not dropped",
+          c.get("Account: created from a table row (no such record from its tool yet)") == 1
+          and any(by_id[b]["props"].get("login") == "noahp" for _, b in L["AUTHORED_BY"])
           and c.get("APPROVED_BY skipped: the schema needs another kind of record at one end, and there is not exactly one") == 1)
     check("tool tables: the module half of the split cell, with no field, is counted",
           c.get("no field for this column: PR / module (part 2)") == 3)
@@ -247,8 +249,11 @@ def tool_table_checks(check):
           and kn[0]["props"].get("effective_from") in ("2026-10-03T00:00:00Z", "2026-10-08T00:00:00Z")
           and sum(1 for lk in links if lk["type"] == "EXTRACTED_FROM" and by_id[lk["a"]]["type"] == "Knowledge") == 2)
     check("tool tables: every written record and link validates", not base.all_valid(recs, links, by_id))
-    check("tool tables: the accepted mappings' pieces are not read again as text", not any(
-        "Auth retry audit fields" in base.shown(p) for n, p in model.calls if n == "ekg_doc_facts"))
+    merge_entry = next(e for e in base.rows(out / "ledger.jsonl")
+                       if e["kind"] == "table_map" and (e.get("mapping") or {}).get("row_type") == "PullRequest")
+    check("tool tables: a mapping that leaves a column unread (the merge log's module part) has its table read as text too",
+          merge_entry["mapping"].get("also_text", {}).get("unread_columns") == ["c2.2"]
+          and any("Auth retry audit fields" in base.shown(p) for n, p in model.calls if n == "ekg_doc_facts"))
 
     # a split that does not parse every sample row rejects the mapping, and the table is read as text
     g, *_ = tool_graph()
