@@ -213,6 +213,37 @@ class View:
         if idx is not None and val is not None and r["id"] not in idx[_field_key(val)]:
             idx[_field_key(val)].append(r["id"])
 
+    def named_otherwise(self, name, person_types):
+        """What a phrase given as a person's name is instead, by the graph's own records, or None. A personal name
+        is neither the name of a record of another kind (a team, a seat, a service, a topic ...), nor holds one as a
+        run of two or more of its words ("Shipment & Operations Product Manager" holds the team "Shipment &
+        Operations"), nor is or holds a job title a person record of the graph holds ("Product Manager"). The
+        records of the person's own identity (`person_types`: the person, its accounts, its addresses) do not count."""
+        self._index()
+        words = name_key(name).split()
+        runs = [" ".join(words[i:j]) for i in range(len(words)) for j in range(len(words), i, -1)
+                if j - i >= 2 or j - i == len(words)]
+        titles = None
+        for run in runs:
+            other = next((self.rec[i] for i in self._names.get(run, ()) if self.rec[i]["type"] not in person_types), None)
+            if other is not None:
+                return f"the name of a {other['type']}"
+            if titles is None:   # the other names person records hold (their job titles), as name keys: the whole
+                # title and every run of two or more of its words ("Product Manager / Payment & Billing" holds
+                # "product manager", the title as a directory writes it with the person's area)
+                titles = set()
+                for t in person_types:
+                    if t not in common._reg.records or extract_schema.PERSONAL_NAME not in common._reg.record(t).fields:
+                        continue
+                    for r in self.by_type.get(t, ()):
+                        for f in extract_schema.OTHER_NAMES:
+                            if isinstance(r["props"].get(f), str) and (tw := name_key(r["props"][f]).split()):
+                                titles.add(" ".join(tw))
+                                titles.update(" ".join(tw[i:j]) for i in range(len(tw)) for j in range(i + 2, len(tw) + 1))
+            if run in titles:
+                return "a job title a person holds"
+        return None
+
     def by_name_prefix(self, name, types):
         """Records of `types` whose personal name is `name` followed by more words, where those words are the
         value of another of that record's fields or the name of a record linked to it: "Lionel" is the record

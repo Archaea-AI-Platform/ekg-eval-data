@@ -218,9 +218,11 @@ def table_checks(check):
           and set(acc["Activity"]["also_text"]["unread_columns"]) == {"c2.2", "c3.2"} and read_as_text("Lionel 42"))
     check("tables: the merge log, every column part read (its module part now linked), is not read again as text",
           acc["Merges"]["status"] == "accepted" and not read_as_text("#174 / PAY-AUTH"))
-    check("tables: a mapping reply over the tokens a mapping may take is a rejection (not an error), and the table is read as text",
-          acc["Groups"]["status"] == "rejected" and "mapping reply too long" in acc["Groups"]["reason"]
-          and "15,000 tokens" in acc["Groups"]["reason"] and read_as_text("eng-ops | Shipment"))
+    groups = next(e for e in base.rows(out / "ledger.jsonl") if (e.get("mapping") or {}).get("row_type") == "Group")
+    check("tables: a whole mapping reply over the tokens a mapping may take at both tiers is kept (the shorter) and held "
+          "to the checks like any other; the ledger says it was over the guard",
+          acc["Groups"]["status"].startswith("accepted") and len(acc["Groups"]["refused_by_the_guard"]) == 4
+          and "15,000 tokens" in groups["steps"]["kept_over_the_guard"][0])
     check("tables: a mapping that lists more entries than the table has columns is rejected (a mapping names columns)",
           acc["Wide"]["status"] == "rejected" and "more entries than the table has columns" in acc["Wide"]["reason"])
     check("tables: the report has one acceptance row per table, with its row type and links",
@@ -249,15 +251,17 @@ def table_checks(check):
             await asyncio.sleep(5)
         return getattr(model, name)(prompt, schema)
     model.ask = slow
-    saved = fill_budget.Budget.mapping_seconds
+    saved, saved_max = fill_budget.Budget.mapping_seconds, fill_budget.MAPPING_SECONDS_MAX
     fill_budget.Budget.mapping_seconds = property(lambda self: 1)
+    fill_budget.MAPPING_SECONDS_MAX = 2   # the shorter tier, asked after a time-out, may take this long: still too short
     try:
         rep, out, tmp = f1.run_fill(g, model, ["table_map", "doc_facts"], window=131_072, reply_limit=16_384)
     finally:
-        fill_budget.Budget.mapping_seconds = saved
+        fill_budget.Budget.mapping_seconds, fill_budget.MAPPING_SECONDS_MAX = saved, saved_max
     e = [x for x in base.rows(out / "ledger.jsonl") if x["kind"] == "table_map"][0]
     check("tables: a mapping call past its time (the token guard at a slow pace) is given up: rejected, read as text",
-          e["status"] == "rejected" and "no answer after 1 seconds" in e["reason"]
+          e["status"] == "rejected" and "no answer after 2 seconds" in e["reason"]
+          and "no answer after 1 seconds" in str(e["steps"]["refused"])
           and any("eng-ops | Shipment" in base.shown(p) for n, p in model.calls if n == "ekg_doc_facts")
           and fill_budget.sizes(131_072, max_reply_tokens=16_384).mapping_seconds == 307)
     check("tables: a pattern that fails a sample cell only by its character classes is read by the text it writes "

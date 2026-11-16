@@ -317,6 +317,16 @@ def placeholder(value) -> bool:
     return not s or s.casefold() in PLACEHOLDER_WORDS or not re.search(r"[^\W_]", s)
 
 
+# what a personal name never holds: a mark other than . ' ’ - (a / · | & ; ( ...), an underscore, an @login, or a word
+# mixing letters and digits (an id such as E004)
+PERSON_NOISE = re.compile(r"[^\w\s.'’\-]|_|(?:^|\s)@|\b(?=[^\W\d_]*\d)(?=\d*[^\W\d_])\w+\b")
+
+
+def more_than_a_name(value) -> bool:
+    """Does a value meant to be a person's name hold something else too (PERSON_NOISE)? A name has none of these."""
+    return bool(PERSON_NOISE.search(str(value or "")))
+
+
 # a month written by name: the calendar's own names and their abbreviations (Oct, October, Sept), the whole word
 _MONTHS = {**{calendar.month_abbr[i].casefold(): i for i in range(1, 13)},
            **{calendar.month_name[i].casefold(): i for i in range(1, 13)}, "sept": 9}

@@ -268,10 +268,11 @@ def table_checks(check):
     shutil.copy(out / "table_mappings.json", new_out / "table_mappings.json")
     again = Acme()
     rep2, out2, tmp2 = run(again, out=new_out)
-    check("cache: a rebuild reuses each table's accepted mapping by its signature (no call; only the table that was not "
-          "accepted is asked again), and writes the same links",
-          all('"Supporting GitHub record"' in p for n, p in again.calls if n.startswith("ekg_table"))
-          and rep2["kinds"]["table_map"]["mappings_from_cache"] == rep["kinds"]["table_map"].get("accepted", 0)
+    check("cache: a rebuild reuses each table's mapping by its signature, the rejected one's verdict too (no table "
+          "call at all), and writes the same links",
+          not [p for n, p in again.calls if n.startswith("ekg_table")]
+          and rep2["kinds"]["table_map"]["mappings_from_cache"] == rep["kinds"]["table_map"]["to_ask"]
+          and rep2["kinds"]["table_map"].get("accepted") == rep["kinds"]["table_map"].get("accepted")
           and rep2["written"]["links_by_type"] == rep["written"]["links_by_type"])
     sig = lambda header: extract_tables.signature({"id": "d", "props": {"_key": "k"}}, type("T", (), {"heading": "h", "header": header})())
     check("cache: the signature changes with the header row, not with the rows",

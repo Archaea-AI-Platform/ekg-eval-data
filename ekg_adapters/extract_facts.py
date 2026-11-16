@@ -506,6 +506,10 @@ def apply(w, t: Task, e):
             state[ref] = None
             c[f"{rtype}: named too thinly to create (one bare name; no full name, email, login or id)"] += 1
             continue
+        elif (why := not_a_personal_name(v, cat, rtype, x["name"])):
+            state[ref] = None
+            c[f"{rtype}: not created, {why}"] += 1
+            continue
         else:
             state[ref] = _create(w, cat, t, x, src, doc, quality)
             if state[ref] and item_key:
@@ -543,6 +547,22 @@ def thin(cat, rtype, x):
     if identifies(x["name"]):
         return False
     return not any(identifies(val) for f, val in x["fields"] if f in LOOKUP_FIELDS or str(f).endswith("_id"))
+
+
+def not_a_personal_name(v, cat, rtype, name):
+    """Why `name` cannot be the personal name a new person-like record (one named by PERSONAL_NAME) is made with, or
+    None. The registry names such a record by a human's name; a phrase is not one when it holds a mark no name has
+    (PERSON_NOISE: & / ; @ ...), or when the graph knows it, or a run of its words, as another kind of record or as a
+    job title a person holds (View.named_otherwise): "Shipment & Operations Product Manager" is a role, not a person.
+    Decided by the text's structure and the graph's records, never by a list of words."""
+    from .extract_schema import more_than_a_name
+    if cat.name_field(rtype) != PERSONAL_NAME or not name:
+        return None
+    if more_than_a_name(name):
+        return "the name holds a mark no personal name has (a role or a list, not a person)"
+    v._index()
+    other = v.named_otherwise(name, {rtype} | family(common._reg, rtype, v._identity))
+    return f"the name is or holds {other} (a role, not a person)" if other else None
 
 
 def _create(w, cat, t, x, src, doc, quality):

@@ -895,6 +895,8 @@ def table_acceptance(entries):
                     **({"tier": e["steps"]["tier"]} if (e.get("steps") or {}).get("tier") else {}),
                     **({"refused_by_the_guard": e["steps"]["refused"]} if (e.get("steps") or {}).get("refused") else {}),
                     **({"retried_after": e["retried_after"]} if e.get("retried_after") else {}),
+                    **({"split_kept_for_the_rows_it_parses": True} if e.get("split_kept_for_the_rows_it_parses") else {}),
+                    **({"columns_from_other_tables": e["columns_from_other_tables"]} if e.get("columns_from_other_tables") else {}),
                     **({"mapping_from": e["mapping_from"]} if e.get("mapping_from") else {})})
     return out
 
@@ -1088,9 +1090,10 @@ def run(graph: Path, query_master: Path, out: Path | None = None, kinds=None, li
     reasons = collections.defaultdict(collections.Counter)
     answered = []
 
-    def ask_and_apply(tasks, label, apply_first=None):
+    def ask_and_apply(tasks, label, apply_first=None, before_apply=None):
         """Ask what the ledger does not hold, many at once; then write every accepted answer in task order, so
-        what a run writes does not depend on which call came back first."""
+        what a run writes does not depend on which call came back first. `before_apply(tasks, entries)` may
+        settle answers against each other first (the tables of one document: extract_tables.share_columns)."""
         entry, todo, asked_n = {}, [], collections.Counter()
         for t in tasks:
             e = seen.get(t.id)
@@ -1148,6 +1151,8 @@ def run(graph: Path, query_master: Path, out: Path | None = None, kinds=None, li
                             f"calls {responses.calls:,}  from cache {responses.hits:,}")
         if todo:
             asyncio.run(ask_all())
+        if before_apply is not None:
+            before_apply(tasks, entry)
         # written in task order, or by `apply_first` (highest first, ties in task order): deterministic either way
         for t in (sorted(tasks, key=lambda t: -apply_first(entry.get(t.id))) if apply_first else tasks):
             e = entry.get(t.id)
@@ -1174,7 +1179,8 @@ def run(graph: Path, query_master: Path, out: Path | None = None, kinds=None, li
             types_before = {t for t, rs in v.by_type.items() if rs}
             w.defer_table_links = True
             ask_and_apply(built["table_map"][0], "Tables",
-                          apply_first=lambda e: ((e or {}).get("mapping") or {}).get("identifying", 0))
+                          apply_first=lambda e: ((e or {}).get("mapping") or {}).get("identifying", 0),
+                          before_apply=lambda ts, en: extract_tables.share_columns(ts, en, v.catalog()))
             w.defer_table_links = False
             for links_pass in w.table_links:
                 links_pass()

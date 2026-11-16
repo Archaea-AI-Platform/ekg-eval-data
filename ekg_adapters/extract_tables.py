@@ -46,7 +46,7 @@ import hashlib
 import json
 import re
 
-from . import common, extract_facts, fill_docs
+from . import common, extract_facts, extract_schema, fill_docs
 from .extract_schema import ASPECT, LOOKUP_FIELDS, PERSONAL_NAME, coerce, first_sentence, period, placeholder, year_of
 from .fill_tasks import Item, Task, name_key
 
@@ -273,15 +273,16 @@ def candidate_links(catalog, rtype, col_types, key_value=False):
     """The links step 2 may choose from, made by code from the registry: for a rows table, those the registry allows
     between two of the table's record types, the row's and those its columns name (one end always a column's);
     for a key/value table, those with one end the record's type. {link: (from types, to types)}."""
-    reg = common._reg
     if key_value:
         return {n: (a, b) for n, (a, b) in catalog.table_links.items() if rtype in a or rtype in b}
     ends = list(dict.fromkeys([rtype, *col_types.values()]))
     cols = list(col_types.items())
     pairs = {(rtype, ty) for _, ty in cols} | {(t1, t2) for c1, t1 in cols for c2, t2 in cols if c1 != c2}
     out = {}
-    for n in catalog.table_links:
-        hits = [(a, b) for x, y in pairs for a, b in ((x, y), (y, x)) if reg.link_allows(n, a, b)]
+    # the registry's own end types only (catalog.table_links): a link open to "any" record at one end (ABOUT) is
+    # offered for the types it names, never for every pair of the table's types
+    for n, (froms, tos) in catalog.table_links.items():
+        hits = [(a, b) for x, y in pairs for a, b in ((x, y), (y, x)) if a in froms and b in tos]
         if hits:
             out[n] = (sorted({a for a, _ in hits}, key=ends.index), sorted({b for _, b in hits}, key=ends.index))
     return out
@@ -558,7 +559,7 @@ def check(t: Task, ans, catalog, lenient_split=False):
                       **({"period": per} if per else {}),
                       "split": x.get("split") if x.get("split") in SPLITS else "none"})
     if name_col is None and key_col is None and not (tf and tf in used):
-        return {"status": "rejected", "reason": "check: mapping names no column for the row's name, key or statement", "dropped": dict(dropped)}
+        return {"status": "rejected", "reason": f"check: {NO_NAME}", "dropped": dict(dropped)}
     if rtype not in catalog.creatable and not ((name_col is not None and nf) or key_field):   # a tool's record type
         return {"status": "rejected", "reason": f"check: a {rtype} row needs its name or its key field to be matched to the tool's record",
                 "dropped": dict(dropped)}
@@ -683,16 +684,20 @@ def too_long(ans, budget=None):
     return None
 
 
-async def _ask_bounded(ask, prompt, sch, catalog, name="ekg_table_map"):
+async def _ask_bounded(ask, prompt, sch, catalog, name="ekg_table_map", patient=False):
     """One mapping call, bounded in time as well as in tokens: the reply cannot be capped per call (no call passes
     max_tokens), so a reply still running after Budget.mapping_seconds (the token guard at a slow model's pace) is
     given up as one gone round in circles. On ACME v5 one such call ran 11 minutes after the other 14 were done.
     The clock starts when the call is sent (Responses waits for its own gate first), and the pace is the one this
     run's calls really had (fill.slow_pace): on ACME v8, three runs at once made the provider slower than the fixed
-    40 tokens/s, and six sound mappings were given up at 307 seconds."""
+    40 tokens/s, and six sound mappings were given up at 307 seconds. `patient`: the call is the shorter tier asked
+    after the fuller one ran past this limit, and may take MAPPING_SECONDS_MAX: a provider slow at the start of a run
+    (no call finished yet to measure its pace) gave up 5 of 15 sound mappings on ACME v11 and v12, two runs at once."""
     from . import fill, fill_budget
 
     def limit():
+        if patient:
+            return fill_budget.MAPPING_SECONDS_MAX
         b = getattr(catalog, "budget", None) or fill.BUDGET
         pace = fill.slow_pace(fill_budget.SLOW_TOKENS_PER_SECOND)
         return min(max(b.mapping_seconds, int(b.mapping_reply_tokens / max(pace, 1.0))), fill_budget.MAPPING_SECONDS_MAX) \
@@ -708,29 +713,42 @@ def _add_usage(total, ans):
 
 async def _step(ask, make, name, sch, catalog, usage, info):
     """One step, at the fuller tier first; a reply the size or time guard refuses (too_long) is asked once more with
-    the shorter tier (a smaller list of candidates to think about) before the step gives up. Returns (answer, why)."""
-    why = None
+    the shorter tier (a smaller list of candidates to think about) before the step gives up. When every tier came
+    back with a whole answer that only took more tokens than the guard allows (it did finish: no error, no cut, in
+    time), the shortest of those answers is kept and held to check() like any other: on ACME v9 the steward table's
+    step 2 gave the same, sound mapping in 11,950, 13,004 and 15,575 tokens, and only the first was kept. A reply cut
+    or gone past the time guard is never kept. Returns (answer, why)."""
+    why, whole = None, []
     for tier in TIERS:
         prompt_text = make(tier)
-        ans = await _ask_bounded(ask, prompt_text, sch, catalog, name)
+        ans = await _ask_bounded(ask, prompt_text, sch, catalog, name, patient=bool(why and "ran away" in why))
         _add_usage(usage, ans)
         info.setdefault("prompt_chars", {})[name] = len(prompt_text)
         info.setdefault("tier", {})[name] = tier
         if not (why := too_long(ans)):
             return ans, None
         info.setdefault("refused", []).append(f"{name} ({tier}): {why}"[:200])
+        if isinstance(ans, dict) and "error" not in ans and why.startswith("the reply took"):
+            whole.append((ans["_usage"]["completion_tokens"], tier, ans))
+    if len(whole) == len(TIERS):
+        tokens, tier, ans = min(whole, key=lambda x: x[0])
+        info["tier"][name] = tier
+        info.setdefault("kept_over_the_guard", []).append(f"{name} ({tier}): a whole answer in {int(tokens):,} tokens")
+        return ans, None
     return ans, why
 
 
-async def _two_steps(t, ask, catalog, note, usage, info):
+async def _two_steps(t, ask, catalog, note, usage, info, shape=None):
     """Step 1 (shape, row type, name and key columns, what each column names), then step 2 (each column's field or
-    link, from the candidates code found for those types). Returns (one mapping for check(), why refused)."""
+    link, from the candidates code found for those types). `shape`: step 1's answer as code settled it (step 1 is
+    then not asked). Returns (one mapping for check(), why refused)."""
     from .fill import _error
     n = len(t.write["table"].header)
-    shape, why = await _step(ask, lambda tier: prompt(t, catalog, tier, note), "ekg_table_shape", shape_schema(catalog, n),
-                             catalog, usage, info)
-    if why or _error(shape):
-        return shape, why
+    if shape is None:
+        shape, why = await _step(ask, lambda tier: prompt(t, catalog, tier, note), "ekg_table_shape",
+                                 shape_schema(catalog, n), catalog, usage, info)
+        if why or _error(shape):
+            return shape, why
     if (shape.get("shape") or "rows") == "none" or shape.get("row_type") not in catalog.table_types:
         return shape, None   # not a table of records: check() rejects it, no second step
     if (shape.get("shape") or "rows") == "rows" and all(shape.get(k) in (None, "", "none") for k in
@@ -758,36 +776,186 @@ async def settle(t: Task, ask, catalog):
     reason, before the table is left to be read as text. A step refused by the size or time guard at both tiers is
     a rejection: the table is read as text."""
     from . import fill
+    from .fill import _error
     if MAPPINGS is not None and (hit := MAPPINGS.get(t)) is not None:
-        e = check(t, hit, catalog)
-        if e["status"] == "accepted":
+        e = check(t, hit, catalog, lenient_split=bool(hit.get(LENIENT)))
+        if e["status"] == "accepted" or hit.get(VERDICT) == "rejected":
             MAPPINGS.hits += 1
-            return {**e, "mapping_from": "cache: this table's accepted mapping from an earlier run"}
-    usage, info, note, retried = {}, {}, "", None
+            return {**e, "answer": hit, "mapping_from": f"cache: this table's {hit.get(VERDICT) or 'accepted'} mapping from an earlier run",
+                    **({"split_kept_for_the_rows_it_parses": True} if hit.get(LENIENT) and e["status"] == "accepted" else {})}
+    usage, info, note, retried, failed = {}, {}, "", None, []
     for attempt in range(MAPPING_RETRIES + 1):
         ans, why = await _two_steps(t, ask, catalog, note, usage, info)
         if why:
             e = {"status": "rejected", "reason": f"check: mapping reply too long: {why}"}
         else:
             e = check(t, ans, catalog)
+            if e["status"] == "rejected" and e["reason"].startswith("check:"):
+                failed.insert(0, (ans, e["reason"]))   # the latest answer first
         if retried:
             e["retried_after"] = retried
         if why or e["status"] != "rejected" or not e["reason"].startswith("check:") or attempt == MAPPING_RETRIES:
             break
         retried = e["reason"][:200]
         note = (f"\n\nAN EARLIER MAPPING OF THIS TABLE WAS REJECTED ({e['reason'][7:]}). Give a corrected answer.")
-    if retried and e["status"] == "rejected" and "does not parse the sample row cell" in e["reason"]:
-        # asked again and the split still misses a cell or two ("Jonathan; Ben for infrastructure issues" beside
-        # "Mahesh / mahesh@acme.com"): keep the split for the rows it reads, count the rest, read the table as text too
-        lenient = check(t, ans, catalog, lenient_split=True)
-        if lenient["status"] == "accepted":
-            e = {**lenient, "retried_after": retried, "split_kept_for_the_rows_it_parses": True}
+    if retried and e["status"] == "rejected":
+        # asked again and still rejected (on the same fault, another one, or the guard): the verdict does not hang on
+        # the second answer. An answer (the corrected one first, else the first) whose only faults are a split that
+        # misses a cell or two ("Jonathan; Ben for infrastructure issues" beside "Mahesh · mahesh@acme.com") or an
+        # identity link column that gives one value to several rows (a team code read as everyone's account) is kept
+        # without them: the split for the rows it parses (the rest counted, the table read as text too), the rest of
+        # the mapping without that column (left unread, so read as text too)
+        for got, reason in failed:
+            got, kept = _without_shared_identity(got, reason), {}
+            again = check(t, got, catalog)
+            if again["status"] == "rejected" and "does not parse the sample row cell" in again["reason"]:
+                again, kept = check(t, got, catalog, lenient_split=True), {LENIENT: True}
+            if again["status"] == "accepted":
+                e = {**again, "retried_after": retried, **({"split_kept_for_the_rows_it_parses": True} if kept else {}),
+                     **({"identity_column_left_out": reason[7:200]} if "gives one value" in reason else {})}
+                ans = {**got, **kept}
+                break
+    if retried and e["status"] == "rejected" and NO_NAME in e["reason"] and isinstance(ans, dict) \
+            and (fixed := _row_from_columns(ans, catalog)) is not None:
+        # asked again and step 1 still names no column for its row type (a relation table read as a Handover or a
+        # PropertyClaim, whose name no column holds): the rule step 1 was given says a relation's row is the record at
+        # one end, one a column names. Code takes the first column step 1 typed as that record, and asks step 2 once
+        again, again_why = await _two_steps(t, ask, catalog, "", usage, info, shape=fixed)
+        if not again_why:
+            got = check(t, again, catalog)
+            if got["status"] == "accepted":
+                e, ans = {**got, "retried_after": retried,
+                          "row_type_from_columns": f"{ans.get('row_type')} -> {fixed['row_type']} named by {fixed['name_column']}"}, again
     if usage:
         e["usage"] = usage
     e["steps"] = info
-    if e["status"] == "accepted" and MAPPINGS is not None:
-        MAPPINGS.put(t, ans, getattr(fill, "MODEL_NAME", ""))
+    if e["status"] == "accepted":
+        e["answer"] = ans   # the answer as checked: share_columns reads it, the mapping cache keeps it
+        if MAPPINGS is not None:
+            MAPPINGS.put(t, ans, getattr(fill, "MODEL_NAME", ""))
+    elif MAPPINGS is not None and isinstance(ans, dict) and not _error(ans) and "too long" not in e["reason"]:
+        # the model's own verdict (not a table of records) or one the checks gave its answers: kept too, so that a
+        # rebuild asks nothing for this table; a reply the guard refused or a failed call is asked again next time
+        MAPPINGS.put(t, {**ans, VERDICT: "rejected"}, getattr(fill, "MODEL_NAME", ""))
     return e
+
+
+VERDICT = "_verdict"   # a kept answer the checks rejected (its table is read as text): "rejected"
+NO_NAME = "mapping names no column for the row's name, key or statement"
+
+
+def _row_from_columns(shape, catalog):
+    """Step 1's answer with its row taken as the record the first typed column names (in the table's column order),
+    when its own row type has no name, key or statement column; None when no typed column names a type a document
+    may create by its name. On ACME's 3-row change table ("Effective | Change | Supporting GitHub record") the only
+    typed column is a pull request reference, so that table stays rejected (read as text), as in every build."""
+    def order(c):
+        return tuple(int(x) for x in re.findall(r"\d+", c))
+    typed = sorted(((c, ty) for c, ty in column_types(shape).items() if re.fullmatch(r"c\d+(?:\.\d+)?", c)),
+                   key=lambda x: order(x[0]))
+    # a type a document may create and that is found by its name (a person, a service): a tool's record (a pull
+    # request named by a phrase like "Order-state PR #221") is matched by its key, never by such a name
+    pick = next(((c, ty) for c, ty in typed if ty in catalog.creatable and catalog.name_field(ty)), None)
+    if pick is None:
+        return None
+    return {**shape, "shape": "rows", "row_type": pick[1], "name_column": pick[0], "key_column": "none",
+            "statement_column": "none", "columns": [x for x in shape.get("columns") or [] if isinstance(x, dict)
+                                                    and x.get("column") != pick[0]]}
+
+
+def _without_shared_identity(ans, reason):
+    """The answer without the identity link of the column _shared_identity named in `reason`, else unchanged."""
+    m = re.search(r"column (c\d+(?:\.\d+)?) gives one value", reason or "")
+    if not m:
+        return ans
+    identity = {x for x, lk in common._reg.links.items() if lk.relation in ("ALIAS_OF", "HAS_ACCOUNT")}
+    keep = [x for x in ans.get("links") or [] if not (isinstance(x, dict) and x.get("column") == m.group(1)
+                                                       and x.get("link") in identity)]
+    return {**ans, "links": keep}
+
+
+LENIENT = "_split_kept_for_the_rows_it_parses"   # a kept answer whose split was accepted for the rows it parses
+
+
+def _used_columns(ans):
+    """Every column or column part an answer reads: name, key, statement, fields, link columns, their near ends,
+    their own fields and period columns."""
+    used = {ans.get(k) for k in ("name_column", "key_column", "statement_column")}
+    used |= {f.get("column") for f in ans.get("fields") or [] if isinstance(f, dict)}
+    for x in ans.get("links") or []:
+        if isinstance(x, dict):
+            used |= {x.get("column"), x.get("from_column")} | {f.get("column") for f in x.get("fields") or [] if isinstance(f, dict)}
+            used.add((x.get("period") or {}).get("column") if isinstance(x.get("period"), dict) else None)
+    return {c for c in used if isinstance(c, str) and c not in ("", "none", "row")}
+
+
+def share_columns(tasks, entries, catalog):
+    """The tables of one document read alike, so that one table's answer does not leave out what another's reads.
+    When a table's accepted mapping reads a part of a composite column as a link from the row (the third value of
+    "E003 Lionel / eng-orders" as MEMBER_OF a Group), and another accepted table of the same document, with the same
+    row type, has a column of the same header that the same split cuts into the same values, while its own mapping
+    leaves that part unread ("E018 Charolette / pm-orders"), the link is added to that table's answer and the answer is
+    checked again (check): kept only when it still passes. Code only, no call; decided by the document's own
+    headers and cells. Each table is read against the others' answers as the model gave them, in task order, so
+    the result does not depend on the order the answers came back. entries: {task id: ledger entry}, changed in place."""
+    by_doc = collections.defaultdict(list)
+    for t in tasks:
+        e = entries.get(t.id)
+        if t.kind == "table_map" and e and e.get("status") == "accepted" and isinstance(e.get("answer"), dict) \
+                and (e.get("mapping") or {}).get("shape") == "rows":
+            by_doc[t.write["doc"]].append((t, e))
+    for tabs in by_doc.values():
+        for t, e in tabs:
+            ans, tb = e["answer"], t.write["table"]
+            heads = [_norm(h) for h in tb.header]
+            cells_of = lambda i: [cells[i] if i < len(cells) else "" for _, cells in tb.rows()]
+            used, parts = _used_columns(ans), [dict(p) for p in ans.get("cell_parts") or [] if isinstance(p, dict)]
+            links, cols, notes = list(ans.get("links") or []), list(ans.get("columns") or []), []
+            for s, se in tabs:
+                if s is t or se["mapping"]["row_type"] != e["mapping"]["row_type"]:
+                    continue
+                sa, sh = se["answer"], s.write["table"].header
+                for x in sa.get("links") or []:
+                    m = re.fullmatch(r"c([1-9]\d*)\.([1-9]\d*)", str(x.get("column") if isinstance(x, dict) else ""))
+                    if not m or (x.get("from_column") or "row") not in ("row", "none") or int(m.group(1)) > len(sh):
+                        continue
+                    sc, k = int(m.group(1)), int(m.group(2))
+                    if not any(l["link"] == x.get("link") and _col_name(l["column"], len(sh), se["mapping"]["parts"]) == x["column"]
+                               for l in se["mapping"]["links"]):   # the source mapping really writes it
+                        continue
+                    # the splits as check() applies them (a pattern it repaired, a separator it read off a pattern)
+                    spec_s = next((p for p in se["mapping"].get("parts") or [] if p[0] == sc - 1), None)
+                    if spec_s is None or _norm(sh[sc - 1]) not in heads:
+                        continue
+                    ct = heads.index(_norm(sh[sc - 1])) + 1
+                    target = f"c{ct}.{k}"
+                    if target in used:
+                        continue
+                    spec_t = next((p for p in e["mapping"].get("parts") or [] if p[0] == ct - 1), None)
+                    cells = [c for c in cells_of(ct - 1) if not placeholder(c)]
+                    by_s = [split_cell(c, [ct - 1, *spec_s[1:]]) for c in cells]
+                    if not cells or any(v is None for v in by_s):
+                        continue   # the other table's split does not cut every cell of this column
+                    if spec_t is not None:
+                        if spec_t[1] != spec_s[1] or any(split_cell(c, spec_t) != v for c, v in zip(cells, by_s)):
+                            continue   # this table cuts the column otherwise
+                    elif f"c{ct}" in used:
+                        continue   # the whole cell is read as something else
+                    else:
+                        parts.append({"column": f"c{ct}", "parts": spec_s[1], "separator": spec_s[2], "pattern": spec_s[3]})
+                    links.append({**x, "column": target, "from_column": "row"})
+                    cols.append({"column": target, "type": x.get("other_type")})
+                    used.add(target)
+                    notes.append(f"{target} {x.get('link')} {x.get('other_type')}, as \"{s.question}\" reads column "
+                                 f"\"{sh[sc - 1]}\""[:240])
+            if not notes:
+                continue
+            got = check(t, {**ans, "cell_parts": parts, "links": links, "columns": cols}, catalog,
+                        lenient_split=bool(ans.get(LENIENT)))
+            if got["status"] == "accepted":
+                e["mapping"] = got["mapping"]
+                e["columns_from_other_tables"] = notes
+    return None
 
 
 def _shared_identity(tb, parts, name_col, key_col, links, n):
@@ -814,13 +982,13 @@ def _shared_identity(tb, parts, name_col, key_col, links, n):
     return None
 
 
-PERSON_NOISE = re.compile(r"[^\w\s.'’\-]|_|(?:^|\s)@|\b(?=[^\W\d_]*\d)(?=\d*[^\W\d_])\w+\b")
+PERSON_NOISE = extract_schema.PERSON_NOISE
 
 
 def _more_than_a_name(cell):
     """Does a cell meant to be a person's name hold something else too: a separator mark (/ · | ( ...), an @login,
     an underscore, or a word mixing letters and digits (an id such as E004)? A name has none of these."""
-    return bool(PERSON_NOISE.search(cell))
+    return extract_schema.more_than_a_name(cell)
 
 
 def _col_name(i, n, parts):
@@ -896,6 +1064,16 @@ def _cell_parts(t, specs, n, unsplit=None):
                 return [], {}, f"the pattern for {c} is not a regular expression ({ex})"
         part = [i, count, sep, pattern]
         bad = next((row[i] for row in sample if i < len(row) and split_cell(row[i], part) is None), None)
+        if bad is not None and pattern and "\\\\" in pattern:
+            # a pattern escaped twice ("(\\w+)\\s+..." matches a backslash, never a cell): the JSON reply quoted it
+            # once too often. Read once unescaped, it is kept only if it then splits every sample row
+            try:
+                once = pattern.replace("\\\\", "\\")
+                alt = [i, count, "", once] if re.compile(once).groups == count else None
+            except re.error:
+                alt = None
+            if alt and all(split_cell(row[i], alt) is not None for row in sample if i < len(row)):
+                part, bad = alt, None
         if bad is not None and pattern and (lit := _pattern_separator(pattern, count)):
             # the pattern's own text between its groups, used as the separator: "#(\d+) / (\w+)" fails on
             # "#174 / PAY-AUTH" only because \w has no dash; " / " splits every sample row
@@ -1060,10 +1238,16 @@ def apply(w, t: Task, e):
             # a cell value that holds more than a name ("Jonathan; Ben for infrastructure issues"): found if it is one,
             # never made a person of its own (the column check rejects a column of such cells; this is one cell)
             noisy = onf == PERSONAL_NAME and not key_field and _more_than_a_name(val.lstrip("@"))
+            # a role or another record's name in a person column ("Product Manager"): found if it is one, never made
+            role = onf == PERSONAL_NAME and not key_field and not bare and not noisy \
+                and extract_facts.not_a_personal_name(v, cat, ty, val.lstrip("@"))
             other, why = obtain(ty, val, val, props, unit, what, key_field=key_field, create=True,
-                                same_kind=l["link"] in v._identity, never_create=bare or noisy)
+                                same_kind=l["link"] in v._identity, never_create=bare or noisy or bool(role))
             if why == THIN and noisy and not bare:
                 c[f"{ty}: a cell that holds more than a name (\"{val[:30]}\"), not created and not linked"] += 1
+                continue
+            if why == THIN and role:
+                c[f"{ty}: not created from a table cell, {role}"] += 1
                 continue
             if why == THIN:
                 if thin is not None:
