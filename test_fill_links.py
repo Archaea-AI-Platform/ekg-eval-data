@@ -22,6 +22,7 @@ import asyncio
 import collections
 import json
 import shutil
+import sqlite3
 import sys
 import tempfile
 from pathlib import Path
@@ -31,7 +32,7 @@ sys.path.insert(0, str(HERE))
 
 import test_fill_documents as base  # noqa: E402  (fixtures and the stand-in model)
 import test_fill_followups as f1  # noqa: E402
-from ekg_adapters import common, extract_facts, extract_schema, extract_tables, fill, fill_budget, llm  # noqa: E402
+from ekg_adapters import common, extract_facts, extract_schema, extract_tables, fill, fill_budget, llm, sqlite_store  # noqa: E402
 from ekg_adapters.fill_tasks import View  # noqa: E402
 
 ORIGINAL_ASK = llm.ask   # base.run_fill replaces llm.ask with the stand-in; the usage checks need the real one
@@ -290,6 +291,166 @@ def table_checks(check):
           and extract_tables.too_long({"_usage": {"completion_tokens": 900}}, fill_budget.sizes(131_072, max_reply_tokens=16_384)) is None)
 
 
+# ---------------------------------------------------------------- 2b. a repository path written with its root "/"
+
+ROUTING = ("Repository | Path scope | Reviewers\n"
+           "payments-platform | /src/payments/authorization.py | @suzan\n"
+           "payments-platform | /src/payments/ | @suzan")
+ROUTING_MAP = f1.empty_kv(row_type="File", name_column="c2", key_column="none", key_field="none", statement_column="none",
+                          cell_parts=[], fields=[{"column": "c2", "field": "path"}], links=[], schema_gap="")
+SLASHED = ("Group | Scope\n/deploy | Release engineering")
+SLASHED_MAP = f1.empty_kv(row_type="Group", name_column="c1", key_column="none", key_field="none", statement_column="none",
+                          cell_parts=[], fields=[{"column": "c2", "field": "text"}], links=[], schema_gap="")
+
+
+def path_checks(check):
+    rp = extract_schema.repo_path
+    check("paths: a repository path's one leading '/' is its root ('/src/a.py' is 'src/a.py'); '//host/x', a bare '/', "
+          "a trailing '/' and a relative path stay as written",
+          rp("/src/a.py") == "src/a.py" and rp("/src/payments/") == "src/payments/" and rp("//host/x") == "//host/x"
+          and rp("/") == "/" and rp("src/a.py") == "src/a.py" and rp(None) is None)
+    g, _ = tool_graph()
+    # the review routing table writes its paths with the root "/"; the commit log and the module table without it
+    base.add_doc(g, "activity.pdf", [("Routing", 1, [("table", ROUTING)]), ("Commits", 1, [("table", COMMITS)]),
+                                     ("Modules", 1, [("table", MODULES)]), ("Slashed", 1, [("table", SLASHED)])])
+    f1.Model.tables = {'"Path scope"': ROUTING_MAP, '"SHA"': COMMIT_MAP, '"Primary file"': MODULE_MAP, '"Scope"': SLASHED_MAP}
+    rep, out, tmp = f1.run_fill(g, Tables(), ["table_map"], window=131_072, reply_limit=16_384)
+    recs, links, by_id = base.written(out, tmp)
+    files = [r for r in by_id.values() if r["type"] == "File" and "payments" in (r["props"].get("name") or "")]
+    auth = [r for r in files if r["props"]["name"].endswith("authorization.py")]
+    check("paths: '/src/payments/authorization.py' (routing table) and 'src/payments/authorization.py' (commit log, "
+          "module table) are one File record, stored without the root '/', and the commit and module links reach it",
+          len(auth) == 1 and auth[0]["props"].get("path") == "src/payments/authorization.py"
+          and auth[0]["props"]["name"] == "src/payments/authorization.py"
+          and any(lk["type"] == "CHANGES" and lk["b"] == auth[0]["id"] for lk in links)
+          and any(lk["type"] == "IN" and lk["a"] == auth[0]["id"] for lk in links))
+    check("paths: a folder's trailing '/' stays ('/src/payments/' -> 'src/payments/'), one record of its own",
+          [r["props"].get("path") for r in files if not r["props"]["name"].endswith(".py")] == ["src/payments/"])
+    grp = [r for r in by_id.values() if r["type"] == "Group" and "deploy" in (r["props"].get("name") or "")]
+    check("paths: a record of a type with no path ('/deploy', a group) keeps its name as written",
+          [r["props"]["name"] for r in grp] == ["/deploy"])
+    v = View(list(by_id.values()), links)
+    check("paths: the name index finds a File by either spelling; a pathless record is found only as written",
+          v.resolve("/src/payments/authorization.py", {"File"}) == auth and v.resolve("src/payments/authorization.py", {"File"}) == auth
+          and v.by_field("File", "path", "/src/payments/authorization.py") == auth
+          and v.resolve("deploy", {"Group"}) == [] and len(v.resolve("/deploy", {"Group"})) == 1)
+    check("paths: every written record and link validates", not base.all_valid(recs, links, by_id))
+
+
+# ---------------------------------------------------------------- 2c. one claim, once
+
+OWNERS = ("Module | Owner | Since\n"
+          "PAY-AUTH | Suzan Kay | 2026-10-08")
+HISTORY = ("Module | Steward | Since | Note\n"
+           "PAY-AUTH | Suzan Kay | 2026-10-08 | Current accountable engineer.")
+OWNERS_MAP = f1.empty_kv(row_type="Service", name_column="c1", key_column="none", key_field="none", statement_column="none",
+                         cell_parts=[], links=[link("c2", "OWNED_BY", "Person", fields=[{"column": "c3", "field": "valid_from"}])],
+                         schema_gap="")
+HISTORY_MAP = f1.empty_kv(row_type="Service", name_column="c1", key_column="none", key_field="none", statement_column="none",
+                          cell_parts=[], links=[link("c2", "OWNED_BY", "Person", fields=[{"column": "c3", "field": "valid_from"},
+                                                                                         {"column": "c4", "field": "aspect"}])],
+                          schema_gap="")
+
+
+def claim_checks(check):
+    g = g0 = common.Graph(observed_at="2026-11-01T00:00:00Z")
+    svc = g.rec("Service", "docs", "pay-auth", {"name": "PAY-AUTH"}, SCOPE)
+    topic = g.rec("Topic", "docs", "billing", {"name": "Billing"}, SCOPE)
+    suzan = g.rec("Person", "hr", "suzan", {"full_name": "Suzan Kay"}, SCOPE)
+    mahesh = g.rec("Person", "hr", "mahesh", {"full_name": "Mahesh Rao"}, SCOPE)
+    ev = lambda n: [g0.rec("Piece", "docs", f"p{n}", {"text": f"piece {n}"}, SCOPE)]
+    since = "2026-10-08T00:00:00Z"
+    plain = g.link("OWNED_BY", svc, suzan, "template_rule", 0.8, ev(1), valid_from=since)
+    noted = g.link("OWNED_BY", svc, suzan, "template_rule", 0.9, ev(2), valid_from=since, aspect="Current accountable engineer.")
+    undated = g.link("OWNED_BY", svc, suzan, "llm_judge", 0.7, ev(3))
+    esc = g.link("KNOWS_ABOUT", mahesh, topic, "template_rule", 0.8, ev(4), role="escalation", condition="mahesh@acme.com")
+    poc = g.link("KNOWS_ABOUT", mahesh, topic, "llm_judge", 0.7, ev(4), role="point_of_contact", basis="stated")
+    then = g.link("OWNED_BY", svc, mahesh, "template_rule", 0.8, ev(5), valid_from="2026-10-03T00:00:00Z", valid_to=since)
+    later = g.link("OWNED_BY", svc, mahesh, "template_rule", 0.8, ev(6), valid_from="2026-11-20T00:00:00Z")
+    loose = g.link("OWNED_BY", svc, mahesh, "llm_judge", 0.7, ev(7))
+    other = g.link("APPROVER_FOR", mahesh, svc, "template_rule", 0.8, ev(8), bound_link=plain["props"]["claim_id"]) \
+        if common._reg.link_allows("APPROVER_FOR", "Person", "Service") else None
+    all_links = [lk for lk, _, _ in g.links.values()]
+    kept, absorbed, rep = common.merge_claims(all_links)
+    cid = lambda lk: lk["props"]["claim_id"]
+    by = {cid(lk): lk for lk in kept}
+    k = by.get(cid(noted))
+    check("claims: one stewardship from two tables (one with an aspect) and a passage that gives no date are one claim, "
+          "the fuller one's claim_id, with every piece as evidence; the two tables' sightings summed (same method), the "
+          "passage's (another method) giving only its evidence",
+          k is not None and cid(plain) not in by and cid(undated) not in by
+          and absorbed == {**{cid(plain): cid(noted), cid(undated): cid(noted)}, **absorbed}
+          and len(k["props"]["evidence"]) == 3 and k["props"]["support_count"] == 2 and k["props"]["confidence"] == 0.9
+          and k["props"]["method"] == "template_rule"
+          and rep["counts"].get("merged across methods: evidence united, the kept claim's method, confidence and sightings unchanged") == 1
+          and k["props"]["aspect"] == "Current accountable engineer." and k["props"]["valid_from"] == since
+          and noted["props"]["evidence"] == [ev(2)[0]["id"]])   # the input is not changed
+    check("claims: claims whose values disagree (escalation vs point_of_contact from one piece) are both kept, counted",
+          cid(esc) in by and cid(poc) in by
+          and rep["counts"].get("not merged: one interval, values that disagree (conflicting claims)") == 1
+          and rep["conflicting_examples"][0]["values"][0].get("role") in ("escalation", "point_of_contact"))
+    check("claims: an undated claim two dated claims could be (Mahesh's two stints) is not merged (counted); the dated "
+          "ones are untouched",
+          cid(loose) in by and cid(then) in by and cid(later) in by
+          and rep["counts"].get("not merged: an undated claim several dated claims state (which one is not known)") == 1)
+    check("claims: a link bound to an absorbed claim is bound to the one kept",
+          other is None or by[cid(other)]["props"]["bound_link"] == cid(noted))
+    # who may see it, and when it holds: a claim visible to fewer people is never folded into a wider one; an undated
+    # claim does not become an ended interval, nor one that began after it was seen
+    h = common.Graph(observed_at="2026-11-01T00:00:00Z")
+    s2, p2 = h.rec("Service", "docs", "ops-label", {"name": "OPS-LABEL"}, SCOPE), h.rec("Person", "hr", "noah", {"full_name": "Noah Patel"}, SCOPE)
+    wide = h.link("OWNED_BY", s2, p2, "template_rule", 0.8, [s2], valid_from="2026-01-01T00:00:00Z", valid_to="2026-10-14T00:00:00Z")
+    narrow = h.link("OWNED_BY", s2, p2, "template_rule", 0.8, [p2], valid_from="2026-01-01T00:00:00Z", valid_to="2026-10-14T00:00:00Z", aspect="x")
+    narrow["acl"] = [*narrow["acl"], ["hr-only"]]
+    open_late = h.link("KNOWS_ABOUT", p2, s2, "template_rule", 0.8, [s2], valid_from="2026-12-01T00:00:00Z")
+    undated_late = h.link("KNOWS_ABOUT", p2, s2, "llm_judge", 0.7, [p2])
+    undated_ended = h.link("OWNED_BY", s2, p2, "llm_judge", 0.7, [p2])
+    k2, ab2, rep2 = common.merge_claims([lk for lk, _, _ in h.links.values()])
+    ids2 = {cid(x) for x in k2}
+    check("claims: a claim whose acl differs (visible to fewer people) is never merged into a wider one",
+          {cid(wide), cid(narrow)} <= ids2)
+    check("claims: an undated claim is not merged into an ended interval, nor into one that began after it was seen (counted)",
+          {cid(undated_ended), cid(undated_late), cid(open_late)} <= ids2
+          and rep2["counts"].get("not merged: an undated claim whose one dated form is not open when it was seen") == 2)
+    again = common.merge_claims(kept)
+    check("claims: merging is idempotent", [cid(x) for x in again[0]] == [cid(x) for x in kept] and not again[1])
+
+    # the LLM stage: two tables write the same stewardship; one link written, both rows its evidence
+    g, _ = tool_graph()
+    base.add_doc(g, "owners.pdf", [("Owners", 1, [("table", OWNERS)]), ("History", 1, [("table", HISTORY)])])
+    f1.Model.tables = {'"Owner"': OWNERS_MAP, '"Steward"': HISTORY_MAP}
+    rep, out, tmp = f1.run_fill(g, Tables(), ["table_map"], window=131_072, reply_limit=16_384)
+    recs, links, by_id = base.written(out, tmp)
+    owned = [lk for lk in base.rows(out / "links.jsonl") if lk["type"] == "OWNED_BY"]
+    check("claims: the LLM stage writes one OWNED_BY for the stewardship two tables state, with both rows as evidence, "
+          "and reports the merge",
+          len(owned) == 1 and owned[0]["props"].get("aspect") == "Current accountable engineer."
+          and len(owned[0]["props"]["evidence"]) == 2
+          and rep["written"]["claims_merged"]["counts"].get("merged: the same claim and interval, one stating less") == 1)
+
+    # save: an adapter's undated claim and the LLM stage's dated one are one row; the files keep their own stage
+    with tempfile.TemporaryDirectory() as d:
+        gp = Path(d) / "graph"
+        ad = common.Graph(observed_at="2026-11-01T00:00:00Z")
+        for r in (svc, suzan, *ev(1), *ev(3)):
+            ad.records[r["props"]["_key"]] = r
+        a_link = ad.link("OWNED_BY", svc, suzan, "field", 1.0, ev(3))
+        ad.write(gp)
+        (gp / "llm").mkdir()
+        dated = dict(plain)
+        with open(gp / "llm" / "links.jsonl", "w", encoding="utf-8") as f:
+            f.write(json.dumps(dated) + "\n")
+        saved = sqlite_store.save(gp, base.QM, log=lambda *_: None)
+        con = sqlite3.connect(saved["sqlite"])
+        rows = con.execute("select claim_id, valid_from, evidence, support_count from ekg_links where type='OWNED_BY'").fetchall()
+        meta = json.loads(dict(con.execute("select key, value from _eval_meta"))["claims_merged"])
+        con.close()
+    check("claims: save makes an adapter's undated claim and the LLM stage's dated claim of it one row (the dated one), "
+          "evidence united, and says so in _eval_meta",
+          len(rows) == 1 and rows[0][0] == cid(plain) and rows[0][1] == since and len(json.loads(rows[0][2])) == 2
+          and rows[0][3] == 1 and meta["absorbed"] == 1 and meta["across_stages"] == 1 and a_link["props"]["claim_id"] != cid(plain))
+
+
 # ---------------------------------------------------------------- 4. ids one requirement cites of another
 
 ORDERS = "ORD-01 Orders are accepted once, even after a double click or a network retry, and keep one placement time."
@@ -413,6 +574,8 @@ def main() -> int:
     try:
         description_checks(check)
         table_checks(check)
+        path_checks(check)
+        claim_checks(check)
         id_checks(check)
         usage_checks(check)
     finally:

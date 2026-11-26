@@ -40,6 +40,8 @@ TEXT_FIELDS = ("statement", "text", "summary")                                  
 LOOKUP_FIELDS = ("display_name", "preferred_name", "work_email", "handle", "normalized_value", "aliases", "emails",
                  "value", "domain")
 SKIP_PILLARS = {"internals", "access"}
+# the registry's field for where a record (a file, a folder, a test) is inside its repository or store
+PATH_FIELD = "path"
 DOCUMENT_TYPES = ("Document", "File", "DocSection", "Piece")
 ORIGIN_RELATION = "RAISED_IN"
 ORIGIN_ORDER = ("EXTRACTED_FROM", "RAISED_IN", "MADE_IN", "DOCUMENTED_IN")  # the first the registry allows is written
@@ -334,6 +336,10 @@ _MONTH_DAY = re.compile(r"(?<![^\W\d_])([^\W\d_]{3,9})\.?\s+(\d{1,2})(?:st|nd|rd
                         r"(?:,?\s+(\d{4}))?(?!\d)")
 _DAY_MONTH = re.compile(r"(?<!\d)(\d{1,2})(?:st|nd|rd|th)?\s+([^\W\d_]{3,9})\.?(?:,?\s+(\d{4}))?(?!\d)")
 _ISO_DAY = re.compile(r"(?<!\d)(\d{4})-(\d{2})-(\d{2})(?!\d)")
+# a time of day written right after a date, as part of it: "T17:00", " 17:00:30", " 17.30", " 17h30", " 5pm", " 5 p.m.",
+# with or without a zone after it. The date's span stays the date; dates_in reports that the day carries a time
+_TIME_OF_DAY = re.compile(r"(?:T|,?\s+)(?:\d{1,2}(?:[:.h]\d{2}(?::\d{2})?)(?:\s*[ap]\.?m\.?)?|\d{1,2}\s*[ap]\.?m\.?)(?![\d:])",
+                          re.I)
 
 
 def _ymd(y, mo, d):
@@ -346,24 +352,44 @@ def _ymd(y, mo, d):
 def dates_in(text, year=None):
     """Every calendar day a text writes, in order, as YYYY-MM-DD: ISO dates, and dates with the month by name
     ("Oct 03, 2026", "3 October 2026", "Oct 03-07" = two days). A date written without its year takes `year` (the
-    caller's: the year of the table's or document's own full dates); without one it is not a date. Spans: [(start, end, day)]."""
+    caller's: the year of the table's or document's own full dates); without one it is not a date.
+    [(start, end, day, timed)]: the span of the date as written, the day, and whether a time of day is written with
+    it ("2026-10-07 17:00", "Oct 07, 2026 5pm"; in "Oct 03-07 17:00" the 7th): then it is a moment, not a whole day."""
     s, out = str(text or ""), []
+    timed = lambda m: bool(_TIME_OF_DAY.match(s, m.end()))
     for m in _ISO_DAY.finditer(s):
         if (d := _ymd(*m.groups())):
-            out.append((m.start(), m.end(), d))
+            out.append((m.start(), m.end(), d, timed(m)))
     for m in _MONTH_DAY.finditer(s):
         mo = _MONTHS.get(m.group(1).casefold())
         y = m.group(4) or year
         if mo and y:
-            for day in [m.group(2)] + ([m.group(3)] if m.group(3) else []):
+            days = [m.group(2)] + ([m.group(3)] if m.group(3) else [])
+            for k, day in enumerate(days):
                 if (d := _ymd(y, mo, day)):
-                    out.append((m.start(), m.end(), d))
+                    out.append((m.start(), m.end(), d, k == len(days) - 1 and timed(m)))
     for m in _DAY_MONTH.finditer(s):
         mo = _MONTHS.get(m.group(2).casefold())
         y = m.group(3) or year
-        if mo and y and not any(a <= m.start() < b for a, b, _ in out) and (d := _ymd(y, mo, m.group(1))):
-            out.append((m.start(), m.end(), d))
+        if mo and y and not any(a <= m.start() < b for a, b, *_ in out) and (d := _ymd(y, mo, m.group(1))):
+            out.append((m.start(), m.end(), d, timed(m)))
     return sorted(out)
+
+
+def repo_path(value):
+    """A path inside a repository or store, as one spelling: its leading "/" is the root, so "/src/a.py" is
+    "src/a.py". Exactly one leading "/" before a name; "//host/x", a bare "/", a trailing "/" (a folder) and any
+    other value are left as written."""
+    if isinstance(value, str) and len(value) > 1 and value[0] == "/" and value[1] != "/":
+        return value[1:]
+    return value
+
+
+def has_path(reg, rtype) -> bool:
+    """Does a record of this type have a path in its repository (the registry gives it PATH_FIELD)? Its path, and a
+    name written as a path, are then read by repo_path when it is found or made."""
+    spec = reg.records.get(rtype)
+    return spec is not None and PATH_FIELD in spec.fields
 
 
 def year_of(texts):
@@ -373,15 +399,27 @@ def year_of(texts):
     return str(max(years)) if years else None
 
 
-def period(text, from_words=(), to_words=(), year=None):
+def period(text, from_words=(), to_words=(), year=None, counter=None):
     """(valid_from, valid_to) a cell gives as a period, each YYYY-MM-DD or None: two dates are a start and an end
     ("Oct 03-07"); one date is an end when an end word of the table's own (to_words, copied from its cells, e.g.
-    "Before") comes before it, else a start ("From Oct 08", "2026-10-08")."""
+    "Before") comes before it, else a start ("From Oct 08", "2026-10-08").
+
+    A range's written last day is in it (Oct 03-07 includes the 7th), and an interval ends exclusive: valid_to is
+    the day after it (2026-10-08). A range whose end is written with a time of day (dates_in says so) is not moved;
+    nor is a last day with no day after it in the calendar (counted in `counter`); a single end date after an end
+    word ("Before Oct 03") is already the first day outside it."""
     found = dates_in(text, year)
     if not found:
         return None, None
     if len(found) >= 2:
-        return found[0][2], found[-1][2]
+        end = found[-1][2]
+        if not found[-1][3]:
+            try:
+                end = (dt.date.fromisoformat(end) + dt.timedelta(days=1)).isoformat()
+            except (OverflowError, ValueError):
+                if counter is not None:
+                    counter["period: a range's last day has no day after it in the calendar, valid_to kept as written"] += 1
+        return found[0][2], end
     before = str(text)[:found[0][0]].casefold()
     ends = any(w and w.casefold() in before for w in to_words)
     starts = any(w and w.casefold() in before for w in from_words)

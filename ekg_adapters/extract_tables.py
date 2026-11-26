@@ -1131,7 +1131,13 @@ def apply(w, t: Task, e):
     def obtain(ty, key, name, props, unit, what, key_field=None, create=False, same_kind=False, never_create=False):
         """The one record a cell names: found in the graph (by its key field when the mapping gives one, so a tool's
         own record is found by its number or sha), made earlier in this table, or created; never created when
-        `never_create` (a bare first name: THIN is returned instead). (rec, why)."""
+        `never_create` (a bare first name: THIN is returned instead). (rec, why).
+        A record with a path in its repository (a File) is found and made by its path read with its leading "/" as
+        the root (repo_path): "/src/a.py" in one table and "src/a.py" in another are one file, one record."""
+        if extract_schema.has_path(reg, ty):
+            nfield = cat.name_field(ty)
+            key, name = extract_schema.repo_path(key), extract_schema.repo_path(name)
+            props = {f: extract_schema.repo_path(x) if f in (extract_schema.PATH_FIELD, nfield) else x for f, x in props.items()}
         found = v.by_field(ty, key_field, props.get(key_field, key)) if key_field else []
         if not found:
             found = None
@@ -1314,6 +1320,11 @@ def apply(w, t: Task, e):
     parts, key_field = m.get("parts") or [], m.get("key_field")
     heads = list(tb.header) + [f"{tb.header[p[0]]} (part {k + 1})" for p in parts for k in range(p[1])]
     unread = unread_columns(m, len(tb.header))
+    # the other fields a record is named or looked up by (a preferred name, a display name, a handle): the row's name
+    # column already gives its name, and the same cell copied into one of these would state a second name the table
+    # does not give. A field of another kind from that cell (a file's path, which its name is) is still written
+    # (the fields the name index reads: fill_tasks.View.add_name)
+    also_names = {f for f in (*extract_schema.names_of(reg.record(rtype)), *LOOKUP_FIELDS) if f != nf}
     # pass 1: every row's own record, so that a later column can name a row further down (a manager)
     rows = []
     for unit, cells in tb.rows():
@@ -1338,6 +1349,10 @@ def apply(w, t: Task, e):
                 c["row skipped: its key does not fit the key field's type"] += 1
                 continue
         for i, f in m["fields"]:
+            if i == m["name"] and nf and f in also_names:   # one cell, one value: the name is not a second name too
+                if cell(cells, i):
+                    c[f"cell skipped: {f} is the row's name column (its name), not a name of its own"] += 1
+                continue
             put(props, f, cell(cells, i))
         if not key:
             if not (tf and props.get(tf)):
@@ -1388,7 +1403,7 @@ def apply(w, t: Task, e):
                 own = [(f, cell(cells, i)) for i, f in l.get("fields", [])]
                 if l.get("period"):   # the link's interval, from the period column (extract_schema.period)
                     pr = l["period"]
-                    for f, day in zip(PERIOD_FIELDS, period(cell(cells, pr["column"]), pr["from_words"], pr["to_words"], year)):
+                    for f, day in zip(PERIOD_FIELDS, period(cell(cells, pr["column"]), pr["from_words"], pr["to_words"], year, c)):
                         if day:
                             own.append((f, day))
                 if l.get("near") is None:

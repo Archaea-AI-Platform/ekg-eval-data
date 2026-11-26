@@ -68,14 +68,14 @@ def empty_kv(**kw):
 def sizing_checks(check):
     b = fill_budget.sizes(131_072, "test", max_reply_tokens=16_384, reply_source="test")
     check("sizes: a 131,072-token window with a 16,384-token reply limit keeps the prompt (235,929 chars) and caps the "
-          "reply at 16,384; an extraction call reads at most 24,576 characters",
-          (b.prompt_chars, b.reply_tokens, b.read_chars) == (235_929, 16_384, 24_576)
-          and fill_budget.READ_SHARE_OF_REPLY == 0.5)
+          "reply at 16,384; an extraction call reads at most 6,144 characters",
+          (b.prompt_chars, b.reply_tokens, b.read_chars) == (235_929, 16_384, 6_144)
+          and fill_budget.READ_SHARE_OF_REPLY == 0.125)
     u = fill_budget.sizes(131_072, "test")
     check("sizes: an unknown reply limit leaves the reply as before (52,429 tokens)", u.reply_tokens == 52_429 and u.reply_limit == 0)
     check("sizes: a reply limit larger than the room left is no cap", fill_budget.sizes(131_072, "t", max_reply_tokens=900_000).reply_tokens == 52_429)
     check("sizes: the report says where the reply limit came from", b.describe()["reply_limit_from"] == "test"
-          and b.describe()["extraction_text_chars_per_call"] == 24_576)
+          and b.describe()["extraction_text_chars_per_call"] == 6_144)
 
     g = base.base_graph()
     base.handbook(g)
@@ -84,23 +84,23 @@ def sizing_checks(check):
         v.overhead.setdefault(k, 4000)
     check("room: extraction kinds (doc_facts, knowledge, doc_knowledge) read no more than the reply can answer; "
           "judge kinds keep the context-based room",
-          v.room("doc_facts") == 24_576 and v.room("knowledge") == 24_576 and v.room("pr_ticket") == v.budget.room(4000) > 200_000)
+          v.room("doc_facts") == 6_144 and v.room("knowledge") == 6_144 and v.room("pr_ticket") == v.budget.room(4000) > 200_000)
     tasks, _ = BUILDERS["doc_facts"](v)
     texts = [sum(len(s.text) for s in t.sources) for t in tasks]
     seen = collections.Counter(m for t in tasks for s in t.sources for m in re.findall(r"MARK-\d{3}", s.text))
-    check(f"room: the 60,000-character handbook becomes {len(tasks)} short windows of at most 24,576 text characters, "
-          "every piece read once", len(tasks) >= 3 and max(texts) <= 24_576 and len(seen) == 60 and set(seen.values()) == {1})
+    check(f"room: the 60,000-character handbook becomes {len(tasks)} short windows of at most 6,144 text characters, "
+          "every piece read once", len(tasks) >= 9 and max(texts) <= 6_144 and len(seen) == 60 and set(seen.values()) == {1})
     v2 = view(g, 131_072)
     t2, _ = BUILDERS["doc_facts"](v2)
-    check("room: without a reply limit the same document fits one window (the context-based room, as before)", len(t2) == 1)
+    check("room: without a reply limit the reply is larger, so are the windows (fewer of them)", 1 <= len(t2) < len(tasks))
 
     model = Model()
     rep, out, _ = run_fill(g, model, ["doc_facts"], window=131_072, reply_limit=16_384)
-    check("run: the reply limit reaches the budget and the report; every call reads at most 24,576 characters",
+    check("run: the reply limit reaches the budget and the report; every call reads at most 6,144 characters",
           rep["budget"]["reply_tokens"] == 16_384 and rep["kinds"]["doc_facts"]["to_ask"] >= 3
-          and rep["kinds"]["doc_facts"]["text_chars_per_window_max"] <= 24_576
+          and rep["kinds"]["doc_facts"]["text_chars_per_window_max"] <= 6_144
           and len([p for n, p in model.calls if n == "ekg_doc_facts" and "NOT COVERED YET" not in p]) == rep["kinds"]["doc_facts"]["to_ask"]
-          and all(len(base.shown(p)) <= 24_576 + 2_000 for n, p in model.calls if n == "ekg_doc_facts"))
+          and all(len(base.shown(p)) <= 6_144 + 2_000 for n, p in model.calls if n == "ekg_doc_facts"))
 
     # where the reply limit comes from: OpenRouter's model list, through query-master's context_window
     saved = llm._context, llm._settings, llm.window_tokens, llm.reply_limit, llm._REPLY_LIMIT

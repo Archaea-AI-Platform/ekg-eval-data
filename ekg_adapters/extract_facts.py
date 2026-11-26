@@ -45,9 +45,14 @@ ASK = ("List every record and every link this text states, using only the record
        "- name: exactly as the text writes it (the full name, the key, the address). Empty for a type that is not named "
        "by a field. For a stated item the text gives an id of its own (a requirement's id), the name starts with that "
        "id as written, then a few words.\n"
-       "- statement: for a type that is \"stated in\" a field, one sentence in your own words saying it; else empty.\n"
+       "- statement: for a type that is \"stated in\" a field, the item whole, as the text states it: every clause, "
+       "condition and exception, and every number, time, date, amount, id and code exactly as written (copy the "
+       "text's own words; never shorten it to a summary); else empty.\n"
+       "- one record per item: a passage that states several facts, rules, values, steps or table rows gives one "
+       "record for each of them; never fold several into one summary record.\n"
        "- fields: only values the text gives for that type's listed fields; dates as YYYY-MM-DD. Leave out what it does not say.\n"
-       "- quote: copy word for word, from ONE passage, the words (under 300 characters) that name or state it; "
+       "- quote: copy word for word, from ONE passage, the words (the whole sentence, list item or table row, under "
+       "600 characters) that name or state it; "
        "source: that passage's label.\n"
        "- links: every relation the text states between two records in your list, in whatever words (X is owned "
        "by Y, Y is responsible for X, A depends on B, the contact for Z is W, a requirement is about a service or "
@@ -57,6 +62,12 @@ ASK = ("List every record and every link this text states, using only the record
        "- A text that speaks for a team (\"we\", \"our team\") states facts about the team the document is by, as its "
        "title or first heading names it: list that team by that name, and link what the text says the team owns, runs, "
        "decides or is the contact for, by the link type whose description says so.\n"
+       "- A thing the text refers to by an id or a proper name of its own (a case, an order, an incident, a programme "
+       "...) for which no more specific listed type fits is a Topic named by that id alone, or that name, as written "
+       "(a heading is a place in the document, not a Topic). List it "
+       "wherever it is mentioned and link the items about it to it (ABOUT).\n"
+       "- The document itself is a record too: when the text says who owns, maintains or wrote this document, list it "
+       "with type File and the document's title exactly as shown after DOCUMENT:, and link it.\n"
        "{worth}\n"
        "- Report only what the text states. Skip navigation, licence and copyright boilerplate, and sample output that "
        "only illustrates; a passage that shows how to do something (a command and what it does) is a how-to, not an "
@@ -118,7 +129,8 @@ def build(v):
             continue
         for ctx, items in doc_windows(v, "doc_facts", doc, units):
             tasks.append(Task("doc_facts", doc.rec["id"], f"Document: {doc.title}", "", items, [],
-                              {"doc": doc.rec["id"], "quality": doc.quality, "room": v.room("doc_facts"), "title": doc.title},
+                              {"doc": doc.rec["id"], "quality": doc.quality, "room": v.room("doc_facts"), "title": doc.title,
+                               "doc_type": doc.rec["type"]},
                               context=ctx))
     return tasks, skipped
 
@@ -145,10 +157,11 @@ def schema(catalog, labels):
             "properties": {"records": {"type": "array", "items": rec}, "links": {"type": "array", "items": link}}}
 
 
-def _check(got, catalog, first_part, records, links, dropped, fixed):
+def _check(got, catalog, first_part, records, links, dropped, fixed, title=None, doc_type=None):
     """Hold each answered part to the text: quotes word for word in a passage shown (the passage the model named,
     or the one other passage that holds it), names in the text, types and links the schema offers. What passes is
-    appended to records / links; what does not is counted in `dropped`."""
+    appended to records / links; what does not is counted in `dropped`. The document itself may be listed by its
+    title as shown (`title`) as a record of its own type (`doc_type`), which its passages need not write."""
     from .fill import find_quote, locate
     known = set(catalog.creatable) | set(catalog.resolvable)
     for part, (shown, ans) in enumerate(got, first_part):
@@ -173,7 +186,8 @@ def _check(got, catalog, first_part, records, links, dropped, fixed):
                 dropped["check: placeholder name (-, n/a ...)"] += 1
             elif not name and not (statement and catalog.text_field(rtype)):
                 dropped["check: record with no name and nothing stated"] += 1
-            elif name and rtype not in catalog.stated and find_quote(name, [src]) is None:
+            elif name and rtype not in catalog.stated and find_quote(name, [src]) is None and \
+                    not (title and doc_type and common._reg.is_a(doc_type, rtype) and name_key(name) == name_key(title)):
                 dropped["check: name not in its source"] += 1  # an entity is named by the text, never by the model
             else:
                 ref = f"{part}:{x.get('ref')}"
@@ -285,7 +299,8 @@ async def settle(t: Task, ask, catalog):
     if not got:
         return {"status": "error", "reason": _error(failed_first[0][1])}
     records, links, dropped, fixed = [], [], collections.Counter(), collections.Counter()
-    part = _check(got, catalog, 0, records, links, dropped, fixed)
+    title, doc_type = t.write.get("title"), t.write.get("doc_type")
+    part = _check(got, catalog, 0, records, links, dropped, fixed, title, doc_type)
     rounds = []
     room = max(t.write.get("room") or sum(len(s.text) for s in t.sources), 2000) // 2   # a follow-up is a smaller window
     unread = {s.label for ss, _ in failed_first for s in ss}   # passages no answer covers: not re-read as "nothing kept"
@@ -300,7 +315,7 @@ async def settle(t: Task, ask, catalog):
                                          for w in windows])
         failed = sum(len(f) for _, f in answers)
         for a, _ in answers:
-            part = _check(a, catalog, part, records, links, dropped, fixed)
+            part = _check(a, catalog, part, records, links, dropped, fixed, title, doc_type)
         kept = len(records) + len(links) - before
         rounds.append({"round": n, "passages": len(again), "paragraphs": sum(len(ps) for _, ps in left),
                        "chars": sum(len(it.text) for it in again), "calls": len(windows), "calls_failed": failed,
@@ -417,7 +432,7 @@ def _props(w, cat, x, src, counts):
     if nf and x["name"]:
         put(nf, x["name"])
     if tf and (x["statement"] or (not nf and x["name"])):
-        put(tf, x["statement"] or x["name"])
+        put(tf, whole_statement(x["statement"] or x["name"], quote) if rtype in cat.stated else x["statement"] or x["name"])
     from .extract_schema import coerce
     for f, val in x["fields"]:
         if f not in offered:
@@ -437,6 +452,72 @@ def _props(w, cat, x, src, counts):
     return props
 
 
+_WORD = re.compile(r"\w+")
+
+
+def whole_statement(statement, quote):
+    """What a stated record (a requirement, a rule, a fact ...) says: the model's statement when it keeps every word
+    of the quote it was checked against (word for word in the source), else the quote itself. A statement worded
+    by the model can drop a clause or an exact value ("regardless of when payment clears", "04:00 UTC"); the
+    source's own words cannot. A quote shorter than the statement is only part of it: the statement stays. The quote's leading id (the item's own number, which the record's name carries) is
+    left out of the comparison and of the statement. Words are compared as the text's letters and digits, case
+    apart, so this holds in any language."""
+    quote = re.sub(r"\s+", " ", str(quote or "")).strip()
+    if (m := ITEM_ID.match(quote)):
+        quote = quote[m.end():].lstrip(" :.-–—|/")
+    words = lambda s: collections.Counter(_WORD.findall(str(s or "").casefold()))
+    said, quoted = words(statement), words(quote)
+    if not quote or not quoted - said or sum(quoted.values()) < sum(said.values()):
+        return statement   # it keeps the quote whole, or the quote is only a part of what it says
+    return quote
+
+
+def fill_fields(w, cat, rec, x, src, shown):
+    """A text that states a value of an existing record's field (a person's status, a service's owning team) gives
+    the record that value when it has none yet: a value it already has is never changed (a different one is
+    counted, not written). Held like a quote: each value must be word for word in the passage (`shown`); a field
+    that identifies a record (its name, a lookup field, an id, a login or address) is never given this way, since
+    identity comes from the record's own source; and the passage's scope must be one the record already carries
+    (every access clause of the passage is among the record's), so no text reaches a record more people can see.
+    Each value keeps its citation (_stated), and the record must still validate."""
+    from .fill import find_quote
+    c = w.facts
+    if any(clause not in rec["scope"] for clause in src["scope"]):
+        c[f"{rec['type']}: stated fields not given, the passage is visible to fewer people than the record"] += 1
+        return
+    identity = {cat.name_field(rec["type"]), cat.text_field(rec["type"]), *LOOKUP_FIELDS}
+    ok = []
+    for f, val in x["fields"]:
+        if f in identity or str(f).endswith("_id") or f in ("login", "address", "emails", "email", "full_name", PERSONAL_NAME):
+            c[f"{rec['type']}: an identifying field ({f}) is not given from a text"] += 1
+        elif not str(val or "").strip() or find_quote(str(val), shown) is None:
+            c[f"{rec['type']}: a stated field value not word for word in its passage, not given"] += 1
+        else:
+            ok.append([f, val])
+    if not ok:
+        return
+    new = _props(w, cat, {**x, "name": "", "statement": "", "fields": ok}, src, c)
+    stated = new.pop("_stated", {})
+    p = rec["props"]
+    gain = {f: new[f] for f in stated if f not in p}
+    gain.update({f"{f}_precision": new[f"{f}_precision"] for f in list(gain) if f"{f}_precision" in new})
+    for f in stated:
+        if f in p and p[f] != new[f]:
+            c[f"{rec['type']}: a stated {f} differs from the one it has, not changed"] += 1
+    if not gain:
+        return
+    before = json.dumps(p)
+    p.update(gain)
+    p["_stated"] = {**p.get("_stated", {}), **{f: stated[f] for f in gain if f in stated}}
+    if not common._vrec(rec).ok:
+        rec["props"] = json.loads(before)
+        c[f"{rec['type']}: stated fields not given, the record would not validate"] += 1
+        return
+    if p.get("_key") in w.old_records:
+        w.patched.add(p["_key"])
+    c[f"{rec['type']}: stated fields given to the existing record"] += 1
+
+
 def apply(w, t: Task, e):
     """Write one window's checked records and links. Names that match several records become entity_choice
     tasks on w.pending; their links wait for the answer."""
@@ -451,9 +532,15 @@ def apply(w, t: Task, e):
         rtype, ref = x["type"], x["ref"]
         # a stated item (a decision, a rule ...) is an existing record only when the text itself writes that
         # record's name or key; a title the model worded is not an identity
+        if rtype == HUB_TYPE and (m := ITEM_ID.match(x["name"])) and m.end() < len(x["name"]):
+            x = {**x, "name": m.group(0)}   # "O-8201 / early capture": the thing is named by its id alone
         named = x["name"] and (rtype not in cat.stated or find_quote(x["name"], [s for s in t.sources if s.id == src["id"]]))
         found = []
-        if rtype not in cat.stated:   # an email or an id the text gives (word for word) identifies it before its name
+        if x["name"] and t.write.get("title") and name_key(x["name"]) == name_key(t.write["title"]) \
+                and common._reg.is_a(doc["type"], rtype):   # the document itself, by its title as shown
+            found = [doc]
+            c[f"{rtype}: the document itself, by its title"] += 1
+        if rtype not in cat.stated and not found:   # an email or an id the text gives (word for word) identifies it first
             shown = [s for s in t.sources if s.id == src["id"]]
             for f, val in x["fields"]:
                 val = str(val or "").strip()
@@ -477,9 +564,24 @@ def apply(w, t: Task, e):
         bare = named and rtype not in cat.stated and thin(cat, rtype, x)
         if bare and not found:   # "Emma": the one record whose personal name starts with it, if there is one
             found = v.by_first_name(x["name"], {rtype})
+        if rtype == HUB_TYPE and not found and named:
+            others = _named_as_other(v, x["name"], rtype)   # existing records first
+            if len(others) == 1:   # "Order Management": the team of that name, not a topic beside it
+                found = others
+                c[f"{rtype}: the name is another record's: that record"] += 1
+            elif others:
+                state[ref] = None
+                c[f"{rtype}: not created, the name is that of several other records"] += 1
+                continue
+            elif name_key(x["name"]) in _headings(t.sources, _outline(w, v, doc)):
+                state[ref] = None
+                c[f"{rtype}: not created, the name is a heading of the document (a place in it, not a thing it names)"] += 1
+                continue
         if len(found) == 1:
             state[ref] = {"rec": found[0], "how": "one"}
             c[f"{rtype}: resolved to the one existing record"] += 1
+            if rtype not in cat.stated and x["fields"]:
+                fill_fields(w, cat, found[0], x, src, [s for s in t.sources if s.id == src["id"]])
         elif len(found) > 1:
             if len(found) > MAX_CHOICES:
                 state[ref] = None
@@ -514,7 +616,7 @@ def apply(w, t: Task, e):
             state[ref] = _create(w, cat, t, x, src, doc, quality)
             if state[ref] and item_key:
                 w.stated_items[item_key] = state[ref]["rec"]
-        if state[ref] and state[ref]["how"] != "new":
+        if state[ref] and state[ref]["how"] != "new" and state[ref]["rec"]["id"] != doc["id"]:
             _mention(w, t, state[ref], src, quality)
     for l in e["links"]:
         ends = [state.get(l["from"]), state.get(l["to"])]
@@ -527,6 +629,49 @@ def apply(w, t: Task, e):
         else:
             _write_link(w, t, l, ends[0], ends[1], tool, quality)
     return None
+
+
+HUB_TYPE = "Topic"   # the registry's record for a subject things hang on: what a thing with an id or name of its own but no
+                     # more specific type is made (a case, an order, a programme), so its mentions in any document meet
+
+
+_NUMBERED = re.compile(r"^\s*\d+(?:\.\d+)*[.)]\s+")   # a section's own number before its heading: "6. ", "2.1) "
+
+
+def _unnumbered(text):
+    return name_key(_NUMBERED.sub("", str(text or "")))
+
+
+def _outline(w, v, doc):
+    """The document's headings, from its outline (fill_docs.Doc), at every level. A document read without one is
+    counted: its other sections' headings are then not known here."""
+    docs, _ = v.docs()
+    found = [d for d in docs if d.rec["id"] == doc["id"]]
+    if not found:
+        w.facts["documents whose outline could not be found (Topic names checked against the passages' headings only)"] += 1
+    return [h for d in found for _, h in d.outline]
+
+
+def _headings(sources, outline=()):
+    """The headings of the document (its outline) and of the passages shown, each level of each heading path, as name
+    keys, as written and without a section's own number ("6. Carrier release" gives both): a name that is one of them
+    is a place in the document, not a thing the text names. Only the headings lose their number, never the name
+    checked against them (a name may start with a year or a count)."""
+    out = {k for heading in outline for h in str(heading).split(" > ") for k in (name_key(h), _unnumbered(h))}
+    for s in sources:
+        title = re.sub(r"\s*\((?:[^()]*)\)$", "", str(s.title or ""))   # "... (table)", "(part 1/2 of this passage)"
+        title = re.sub(r"\s*\((?:[^()]*)\)$", "", title)
+        out |= {k for h in (title, *title.split(" > ")) for k in (name_key(h), _unnumbered(h))}
+    return out - {""}
+
+
+def _named_as_other(v, name, rtype):
+    """The records of another kind of named thing (not `rtype`, not a stated item, not a document part) that the graph
+    knows by exactly this name."""
+    cat = v.catalog()
+    kinds = (set(cat.creatable) | set(cat.resolvable)) - set(cat.stated) - {rtype}
+    v._index()
+    return [v.rec[i] for i in dict.fromkeys(v._names.get(name_key(name), ())) if v.rec[i]["type"] in kinds]
 
 
 _IDENTIFYING = re.compile(r"[\d@._]")  # a value with one of these is an id, a login or an address, not a bare name
@@ -775,3 +920,62 @@ def _runs_into(text, b, cited):
                 return True
         at = t.find(key, at + 1)
     return False
+
+
+# ---------------------------------------------------------------- hand-overs read from dated owners (code only)
+
+OWNER_RELATION = "OWNED_BY"     # the registry's relation of the links that say who owns or is accountable for a thing
+HANDOVER_SIDES = ("HANDOVER_OF", "HANDOVER_FROM", "HANDOVER_TO")   # the registry's links from a Handover, in that order
+SUCCESSOR_LINK = "SUCCEEDS"
+
+
+def derive_handovers(w):
+    """After every document and table is read: where one owner's dated interval of a thing ends on the very day
+    another owner's begins (OWNED_BY Suzan from 2026-10-08, after Mahesh until 2026-10-08), responsibility
+    passed from one to the other then. That is written as the registry has it: a Handover (at, status done, or
+    planned when it lies after the graph's observed time) HANDOVER_OF the thing, HANDOVER_FROM the earlier owner
+    and HANDOVER_TO the later one, the later owner SUCCEEDS the earlier one (at), every link citing the two owner
+    links' evidence. Only the intervals the graph already holds are read: an undated owner, or a gap between two
+    intervals, says nothing about a hand-over. Code only, no model call."""
+    reg, out = common._reg, collections.Counter()
+    if not all(n in reg.links for n in (*HANDOVER_SIDES, SUCCESSOR_LINK)) or "Handover" not in reg.records:
+        return {"skipped": "the registry has no Handover or its links"}
+    owners = collections.defaultdict(list)   # (thing, link type) -> [(from, to, owner id, evidence)]
+    for lk, _, _ in list(w.g.links.values()):
+        spec = reg.links.get(lk["type"])
+        if spec is None or spec.relation != OWNER_RELATION:
+            continue
+        p = lk["props"]
+        owners[(lk["a"], lk["type"])].append((p.get("valid_from"), p.get("valid_to"), lk["b"], p.get("evidence") or []))
+    seen = set()
+    for (thing, ltype), rows in sorted(owners.items()):
+        for f1, t1, a, ev1 in rows:
+            for f2, t2, b, ev2 in rows:
+                if not t1 or t1 != f2 or a == b or (thing, a, b, t1) in seen:
+                    continue
+                seen.add((thing, a, b, t1))
+                out[_handover(w, reg, thing, a, b, t1, sorted(set(ev1) | set(ev2)))] += 1
+    return dict(out)
+
+
+def _handover(w, reg, thing, a, b, at, evidence):
+    rx, ra, rb = w.by_id.get(thing), w.by_id.get(a), w.by_id.get(b)
+    src = next((w.by_id[e] for e in evidence if e in w.by_id), None)
+    if None in (rx, ra, rb, src):
+        return "an end or its evidence is not in the graph: not written"
+    if not (reg.link_allows("HANDOVER_OF", "Handover", rx["type"]) and reg.link_allows("HANDOVER_FROM", "Handover", ra["type"])
+            and reg.link_allows("HANDOVER_TO", "Handover", rb["type"]) and reg.link_allows(SUCCESSOR_LINK, rb["type"], ra["type"])):
+        return f"the registry has no hand-over from a {ra['type']} to a {rb['type']} of a {rx['type']}: not written"
+    status = "planned" if at > (w.g.observed_at or at) else "done"
+    native = "handover:" + hashlib.sha1(f"{thing}|{a}|{b}|{at}".encode()).hexdigest()[:16]
+    rec, why = w.new_record("Handover", "derived", native, {"at": at, "status": status}, src)
+    if why:
+        return f"Handover not created, {why[:80]}"
+    for ltype, end in zip(HANDOVER_SIDES, (rx, ra, rb)):
+        if (why := w._link(ltype, rec, end, evidence, "handover", "reference", 1.0, method="text_rule")):
+            for cid in [cid for cid, (lk, _, _) in w.g.links.items() if lk["a"] == rec["id"]]:
+                del w.g.links[cid]
+            w.drop_record(rec)
+            return f"Handover {ltype} not written, {why[:80]}"
+    why = w._link(SUCCESSOR_LINK, rb, ra, evidence, "handover", "reference", 1.0, method="text_rule", at=at)
+    return "Handover written" + ("" if why is None else f"; SUCCEEDS not written, {why[:80]}")

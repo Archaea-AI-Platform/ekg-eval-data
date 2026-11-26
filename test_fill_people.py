@@ -201,6 +201,53 @@ def prefix_checks(check):
           led[0]["status"] == "rejected" and "more than a name" in led[0]["reason"] and led[0].get("retried_after"))
 
 
+KNOWN_AS = """Employee | Known as | Email
+Margaret Hale | Maggie | margaret.hale@acme.com
+Robert Stone | Bob | robert.stone@acme.com"""
+TEAMS = """Team | Handle
+Payments engineering | eng-payments
+Operations engineering | eng-ops"""
+TEAM_CN = """Group cn | Scope
+eng-orders | Order management source write"""
+REVIEW_ROUTING = """Repository | Path scope | Reviewers
+payments-platform | src/payments/ | @suzan"""
+
+
+def name_copy_checks(check):
+    """A mapping that also maps the row's name column to another name field (preferred_name): one cell is one value."""
+    g = base.base_graph()
+    base.add_doc(g, "dir.pdf", [("Directory", 1, [("table", DIRECTORY_2)]), ("Known as", 1, [("table", KNOWN_AS)]),
+                                ("Routing", 1, [("table", REVIEW_ROUTING)]),
+                                ("Teams", 1, [("table", TEAMS)]), ("Group cn", 1, [("table", TEAM_CN)])])
+    f1.Model.tables = {
+        '"Responsibility"': {**DIRECTORY_2_MAP, "fields": DIRECTORY_2_MAP["fields"] + [{"column": "c1.2", "field": "preferred_name"}]},
+        '"Known as"': f1.empty_kv(row_type="Person", name_column="c1", key_column="c3", key_field="work_email",
+                                  fields=[{"column": "c2", "field": "preferred_name"}]),
+        '"Handle"': f1.empty_kv(row_type="Group", name_column="c1", fields=[{"column": "c2", "field": "handle"}]),
+        '"Group cn"': f1.empty_kv(row_type="Group", name_column="c1", fields=[{"column": "c1", "field": "handle"},
+                                                                           {"column": "c2", "field": "text"}]),
+        '"Path scope"': f1.empty_kv(row_type="File", name_column="c2", fields=[{"column": "c2", "field": "path"}])}
+    rep, out, tmp = f1.run_fill(g, f1.Model(), ["table_map"])
+    recs, links, by_id = base.written(out, tmp)
+    c = rep["written"]["documents_and_tables"]
+    people = {r["props"].get("full_name"): r["props"] for r in by_id.values() if r["type"] == "Person"}
+    check("name copy: the name column mapped as preferred_name too gives no preferred name (the table gives none); "
+          "each skipped cell is counted",
+          people.get("Kim") and "preferred_name" not in people["Kim"]
+          and not any(pp.get("preferred_name") == n for n, pp in people.items())
+          and c.get("cell skipped: preferred_name is the row's name column (its name), not a name of its own") == 10)
+    groups = {r["props"].get("name"): r["props"] for r in by_id.values() if r["type"] == "Group"}
+    check("name copy: a preferred name or a handle from a column of its own is written (a different column is never "
+          "dropped); a group's name column copied as its handle is not, and the row's other fields still are",
+          people.get("Margaret Hale", {}).get("preferred_name") == "Maggie" and people["Robert Stone"].get("preferred_name") == "Bob"
+          and groups.get("Payments engineering", {}).get("handle") == "eng-payments"
+          and "handle" not in groups.get("eng-orders", {"handle": 1}) and groups["eng-orders"].get("text")
+          and c.get("cell skipped: handle is the row's name column (its name), not a name of its own") == 1)
+    files = [r["props"] for r in by_id.values() if r["type"] == "File" and r["props"].get("name") == "src/payments/"]
+    check("name copy: a field of another kind from the name column (a file's path, which its name is) is still written",
+          len(files) == 1 and files[0].get("path") == "src/payments/")
+
+
 def main() -> int:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     checks = []
@@ -213,6 +260,7 @@ def main() -> int:
     try:
         directory_checks(check)
         prefix_checks(check)
+        name_copy_checks(check)
     finally:
         for d in base.TEMP:
             shutil.rmtree(d, ignore_errors=True)

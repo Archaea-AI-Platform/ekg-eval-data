@@ -2,7 +2,7 @@
 document's own properties as meta.
 
 With pdfplumber the page's ruled tables are read as tables and the text around them as paragraphs,
-in reading order. Without it, pypdf gives the page's text (a table then comes out as its lines).
+in reading order; a table drawn without lines is found from where its words sit (see `_borderless`). Without it, pypdf gives the page's text (a table then comes out as its lines).
 With neither, the format is unsupported. A page with no text layer (a scan) is counted in
 `quality.empty_pages` and warned about; nothing is recognised here, but `ocr` may be passed: a
 callable `ocr(pdf_bytes, page_index) -> text` that is asked for exactly those pages.
@@ -66,15 +66,8 @@ def _columns(page, table, rows):
     words = [w for ws in lines for w in ws]
     if len(lines) != len(rows) or len(words) < 2:
         return None
-    heights = sorted(w["bottom"] - w["top"] for w in words)
-    min_gap = 0.75 * heights[len(heights) // 2]
-    spans = []   # the x ranges that hold text in some row, merged
-    for x0, x1 in sorted((w["x0"], w["x1"]) for w in words):
-        if spans and x0 <= spans[-1][1]:
-            spans[-1][1] = max(spans[-1][1], x1)
-        else:
-            spans.append([x0, x1])
-    cuts = [(a[1] + b[0]) / 2 for a, b in zip(spans, spans[1:]) if b[0] - a[1] >= min_gap]
+    min_gap = 0.75 * _line_height(words)
+    cuts = _strips(words, min_gap)
     if not cuts:
         return None
     out = []
@@ -84,6 +77,23 @@ def _columns(page, table, rows):
             cells[sum(1 for c in cuts if (w["x0"] + w["x1"]) / 2 > c)].append(w)
         out.append([_cell_lines(c, min_gap) for c in cells])
     return out
+
+
+def _line_height(words):
+    """The height of a text line among these words: the median word height."""
+    heights = sorted(w["bottom"] - w["top"] for w in words)
+    return heights[len(heights) // 2]
+
+
+def _strips(words, min_gap):
+    """[x] the middles of the vertical strips of white no word crosses, each at least `min_gap` wide."""
+    spans = []   # the x ranges that hold text in some word, merged
+    for x0, x1 in sorted((w["x0"], w["x1"]) for w in words):
+        if spans and x0 <= spans[-1][1]:
+            spans[-1][1] = max(spans[-1][1], x1)
+        else:
+            spans.append([x0, x1])
+    return [(a[1] + b[0]) / 2 for a, b in zip(spans, spans[1:]) if b[0] - a[1] >= min_gap]
 
 
 def _cell_lines(words, gap):
@@ -136,14 +146,89 @@ def _plumber_page(page):
     for bbox, rows in tables:
         width = max(len(r) for r in rows)
         out.append((bbox[1], Block("table", rows=[r + [""] * (width - len(r)) for r in rows], header=True), bbox))
-    lines = []
+    lines, words = [], rest.extract_words()
     for ln in rest.extract_text_lines():
         text = ln["text"].strip()
         if text:
             size, bold = _line_style(ln)
             lines.append({"top": ln["top"], "bottom": ln["bottom"], "x0": ln["x0"], "x1": ln["x1"], "text": text,
-                          "size": size, "bold": bold})
+                          "size": size, "bold": bold, "words": _line_words(ln, text, words)})
     return out, lines
+
+
+def _line_words(ln, text, words):
+    """The words of one text line, each with its place, or None when they do not hold exactly the line's text
+    (the line is then never read as part of a table)."""
+    mine = [{k: w[k] for k in ("x0", "x1", "top", "bottom", "text")} for w in words
+            if ln["top"] - 1 <= (w["top"] + w["bottom"]) / 2 <= ln["bottom"] + 1
+            and ln["x0"] - 1 <= w["x0"] and w["x1"] <= ln["x1"] + 1]
+    return mine if mine and sum(nonws(w["text"]) for w in mine) == nonws(text) else None
+
+
+def _borderless(groups):
+    """A table drawn without lines at the start of `groups` (a page's runs of paragraph lines, a run ending where
+    the white between two lines is wider than a line gap): (how many runs it takes, rows, bbox, where each column
+    starts), or None.
+
+    Its columns are the vertical strips of white that run through all its lines, as for a table ruled between
+    its rows only (`_strips`): prose has none, since every full line of it crosses them. A strip setting off a
+    column narrower than two line heights (a list's bullets or numbers) is not taken. Its rows are the runs of
+    lines, where the table sets its rows apart with white (three runs or more); otherwise, its lines evenly
+    spaced, a row starts at each line with text in the first column. A cell's lines are one text, wrapped to
+    the cell's width, so they are joined by spaces. Every row has text in at least two columns: the table
+    ends at the first run that has not, or that would change its columns; a table has two rows at least."""
+    best = None
+    for end in range(1, len(groups) + 1):
+        grid = _grid(groups[:end])
+        if grid is not None and (best is None or len(grid[0][0]) == len(best[1][0])):
+            best = (end, *grid)
+        elif best is not None or end >= 3:   # a header over a first row wrapped in its first cell only takes three
+            break
+    return best
+
+
+def _grid(groups):
+    """(rows, bbox, where each column starts) of these runs of lines read as one table, or None when they are
+    not one."""
+    lines = [ln for g in groups for ln in g]
+    if len(lines) < 2 or any(not ln["words"] for ln in lines):
+        return None
+    words = [w for ln in lines for w in ln["words"]]
+    height = _line_height(words)
+    cuts = _strips(words, 0.75 * height)
+    col = lambda w: sum(1 for c in cuts if (w["x0"] + w["x1"]) / 2 > c)
+    while cuts:
+        spans = collections.defaultdict(list)
+        for w in words:
+            spans[col(w)] += [w["x0"], w["x1"]]
+        narrow = [k for k in sorted(spans) if max(spans[k]) - min(spans[k]) < 2 * height]
+        if not narrow:
+            break
+        del cuts[min(narrow[0], len(cuts) - 1)]   # the strip after it (before it, for the last column)
+    if not cuts:
+        return None
+    if len(groups) >= 3:
+        sets = groups
+    else:
+        sets = []
+        for g in groups:
+            for n, ln in enumerate(g):
+                if n == 0 or any(col(w) == 0 for w in ln["words"]):
+                    sets.append([])
+                sets[-1].append(ln)
+    rows = []
+    for st in sets:
+        cells = [[] for _ in range(len(cuts) + 1)]
+        for ln in st:
+            for w in sorted(ln["words"], key=lambda w: w["x0"]):
+                cells[col(w)].append(w["text"])
+        rows.append([" ".join(c) for c in cells])
+    if len(rows) < 2 or any(sum(1 for c in r if c) < 2 for r in rows):
+        return None
+    bbox = (min(w["x0"] for w in words), min(w["top"] for w in words), max(w["x1"] for w in words),
+            max(w["bottom"] for w in words))
+    starts = [min(w["x0"] for w in words if col(w) == k) for k in range(len(cuts) + 1)]
+    return rows, bbox, starts
 
 
 # ---------------------------------------------------------------- the text flows across pages
@@ -247,30 +332,42 @@ def _levels(sizes):
 def _page_blocks(tables, lines, body, levels, skip, p):
     """[(top, Block, layout)] of one page in reading order: its tables, its headings (a heading line, or lines
     of one heading size in a row) and its paragraphs (cut where the gap to the next line is wider than a line
-    gap, or where a heading starts or ends)."""
+    gap, or where a heading starts or ends). Paragraphs in a row that line up as a table drawn without lines
+    are that table."""
     out = [(top, b, {"bbox": bbox}) for top, b, bbox in tables]
-    cur, kind, last = [], None, None
-
-    def flush():
-        if cur:
-            if kind == "heading":
-                b = Block("heading", " ".join(ln["text"] for ln in cur), level=levels.get(round(cur[0]["size"], 1), 6))
-            else:
-                b = Block("paragraph", "\n".join(ln["text"] for ln in cur))
-            out.append((cur[0]["top"], b, {"lines": list(cur)}))
-            cur.clear()
-
+    groups, last = [], None   # [(kind, lines)]
     for i in sorted(range(len(lines)), key=lambda i: lines[i]["top"]):
         if (p, i) in skip:
             continue
         ln = lines[i]
         k = "heading" if _is_heading(ln, body) else "paragraph"
         gap = last is not None and ln["top"] - last > 0.7 * max(ln["bottom"] - ln["top"], 1.0)
-        if cur and (gap or k != kind or (k == "heading" and abs(ln["size"] - cur[-1]["size"]) > 0.6)):
-            flush()
-        cur.append(ln)
-        kind, last = k, ln["bottom"]
-    flush()
+        if not groups or gap or k != groups[-1][0] or \
+                (k == "heading" and abs(ln["size"] - groups[-1][1][-1]["size"]) > 0.6):
+            groups.append((k, []))
+        groups[-1][1].append(ln)
+        last = ln["bottom"]
+    g = 0
+    while g < len(groups):
+        kind, cur = groups[g]
+        if kind == "paragraph":
+            run = []
+            for k, ls in groups[g:]:
+                if k != "paragraph":
+                    break
+                run.append(ls)
+            table = _borderless(run)
+            if table:
+                n, rows, bbox, starts = table
+                out.append((bbox[1], Block("table", rows=rows, header=True), {"bbox": bbox, "starts": starts}))
+                g += n
+                continue
+        if kind == "heading":
+            b = Block("heading", " ".join(ln["text"] for ln in cur), level=levels.get(round(cur[0]["size"], 1), 6))
+        else:
+            b = Block("paragraph", "\n".join(ln["text"] for ln in cur))
+        out.append((cur[0]["top"], b, {"lines": list(cur)}))
+        g += 1
     out.sort(key=lambda x: x[0])
     return out
 
@@ -278,7 +375,9 @@ def _page_blocks(tables, lines, body, levels, skip, p):
 def _continues(prev, nxt, right):
     """Does a page's last block run on into the next page's first one? A paragraph does when its last line
     reaches the right edge of the text (a paragraph's own last line stops short of it) and the next page goes
-    on in the same type size; a table does when the next page starts with a table of the same columns."""
+    on in the same type size; a table does when the next page starts with a table of the same columns (for one
+    drawn without lines, its columns starting at the same places: its right edge is only where its longest
+    text ends)."""
     (_, a, la), (_, b, lb) = prev, nxt
     if a.kind == "paragraph" and b.kind == "paragraph":
         end, start = la["lines"][-1], lb["lines"][0]
@@ -287,7 +386,11 @@ def _continues(prev, nxt, right):
     if a.kind == "table" and b.kind == "table":
         ba, bb = la["bbox"], lb["bbox"]
         width = max(ba[2] - ba[0], 1.0)
-        return len(a.rows[0]) == len(b.rows[0]) and abs(ba[0] - bb[0]) <= 0.05 * width and abs(ba[2] - bb[2]) <= 0.05 * width
+        if len(a.rows[0]) != len(b.rows[0]):
+            return False
+        if "starts" in la and "starts" in lb:
+            return all(abs(x - y) <= 0.05 * width for x, y in zip(la["starts"], lb["starts"]))
+        return abs(ba[0] - bb[0]) <= 0.05 * width and abs(ba[2] - bb[2]) <= 0.05 * width
     return False
 
 

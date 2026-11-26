@@ -26,11 +26,15 @@ How much TEXT one call may read depends on what the call answers:
     each with a quote copied from the text, and a reasoning model thinks about all of it first. Its thinking
     and its answer both grow with the text, and both must fit the reply. So the text one such call reads is
     bounded by the reply too:  text tokens <= reply_tokens * READ_SHARE_OF_REPLY. With READ_SHARE_OF_REPLY
-    = 1/2 the reply keeps twice the text's size for thinking plus answer (Budget.read_chars).
+    = 1/8 the reply keeps eight times the text's size for thinking plus answer (Budget.read_chars).
 
-    131,072-token window, 16,384-token reply limit -> 24,576 characters of text per extraction call.
+    131,072-token window, 16,384-token reply limit -> 6,144 characters of text per extraction call.
     (The first real run read 50,000-character documents in one call under a 16,384-token cap and the answers
-    stopped after the first pages; the 15,000-character ones were answered whole.)
+    stopped after the first pages. With a share of 1/2, 24,576 characters, ACME v16's 18,000-20,000-character
+    windows were answered for a few of their passages only: every call stopped at 24-45 records, about 11,000-16,000
+    reply tokens with the thinking, and 115 of 227 paragraphs of the longest document were still unread after the
+    follow-up readings, while its 5,500-character documents were read whole. A document's answer holds about one
+    record per 70 characters of dense text, each with its quote, so a window has to be what one reply can answer.)
 
 A long document therefore becomes many short calls, which run in parallel. A text longer than the room left after the instructions is read in consecutive windows, cut only between
 units (a document's pieces, a conversation's messages). `pack()` never cuts inside a unit; a single unit
@@ -45,7 +49,7 @@ FALLBACK_WINDOW_TOKENS = 32_768   # used only when neither the backend nor a set
 PROMPT_SHARE = 0.60               # query-master's compact_at() default; llm.bind() replaces it with the live value
 CHARS_PER_TOKEN = 3.0             # query-master's DEFAULT_CHARS_PER_TOKEN; llm.bind() replaces it with the live value
 TYPICAL_CHARS_PER_TOKEN = 4.0     # for cost estimates only (English prose); sizing always uses CHARS_PER_TOKEN
-READ_SHARE_OF_REPLY = 0.5         # an extraction call reads at most this share of its reply room in text (see above)
+READ_SHARE_OF_REPLY = 0.125       # an extraction call reads at most this share of its reply room in text (see above)
 SLOW_TOKENS_PER_SECOND = 40      # Glimmer on OpenRouter wrote at least ~57 tokens/s (ACME v5: 14 mappings, up to 11,000
                                   # tokens each, all done within 3.5 minutes at 16 in flight); 40 leaves room. Slower when
                                   # this run's calls were slower (fill.slow_pace: ACME v8, three runs at once)

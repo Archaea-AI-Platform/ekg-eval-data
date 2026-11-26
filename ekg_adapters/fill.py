@@ -41,7 +41,7 @@ from . import common, fill_budget, fill_docs, llm
 from .common import Graph
 from .fill_tasks import BUILDERS, DEFAULT_KINDS, GUIDELINE_STRENGTH, KNOWLEDGE_KINDS, Task, View, _ordered
 
-PROMPT_VERSION = "fill-v5"  # a verdict from another version is asked again (responses.jsonl still answers an unchanged prompt)
+PROMPT_VERSION = "fill-v6"  # a verdict from another version is asked again (responses.jsonl still answers an unchanged prompt)
 
 # How sure a written fact is, by how it was established. These are PRIORS, set by judgement: replace each with
 # the accuracy measured for its row on the evaluation set. The model's own opinion of itself is never used.
@@ -796,7 +796,12 @@ class Writer:
 
     def write(self, out: Path):
         recs = [r for k, r in self.g.records.items() if k not in self.old_records or k in self.patched]
-        links = [lk for cid, (lk, _, _) in self.g.links.items() if cid not in self.old_links]
+        # one claim written twice (two tables, a table and a passage): one link (common.merge_claims). An adapter's
+        # link that took this stage's evidence is written here too (the same claim_id: save keeps this stage's copy);
+        # one this stage's link took in stays in the adapters' file and is merged again when the stages are saved
+        merged, absorbed, self.claims_merged = common.merge_claims(lk for lk, _, _ in self.g.links.values())
+        old = {cid: lk for cid, (lk, _, _) in self.g.links.items() if cid in self.old_links}
+        links = [lk for lk in merged if lk["props"]["claim_id"] not in self.old_links or lk is not old[lk["props"]["claim_id"]]]
         with open(out / "records.jsonl", "w", encoding="utf-8") as f:
             for r in recs:
                 f.write(json.dumps(r, ensure_ascii=False) + "\n")
@@ -804,6 +809,8 @@ class Writer:
             for lk in links:
                 f.write(json.dumps(lk, ensure_ascii=False) + "\n")
         return {"records_new_or_patched": len(recs), "links_new": len(links), "people_links": dict(self.people),
+                "claims_merged": {**self.claims_merged, "absorbed": len(absorbed),
+                                  "adapter_links_absorbed": sum(1 for c in absorbed if c in self.old_links)},
                 "documents_and_tables": dict(sorted(self.facts.items(), key=lambda kv: -kv[1])),
                 "links_by_type": dict(collections.Counter(lk["type"] for lk in links)),
                 "links_by_method": dict(collections.Counter(lk["props"]["method"] for lk in links)),
@@ -1220,6 +1227,8 @@ def run(graph: Path, query_master: Path, out: Path | None = None, kinds=None, li
             from . import extract_facts
             report["id_references"] = extract_facts.link_cited_ids(w)
             log(f"  id references: {json.dumps(report['id_references'], ensure_ascii=False)[:400]}")
+            report["handovers"] = extract_facts.derive_handovers(w)
+            log(f"  hand-overs from dated owners: {json.dumps(report['handovers'], ensure_ascii=False)[:400]}")
     finally:
         responses.close()
     report["calls"] = {"made": responses.calls, "answered_from_responses": responses.hits,

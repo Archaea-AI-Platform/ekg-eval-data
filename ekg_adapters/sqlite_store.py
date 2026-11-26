@@ -239,6 +239,11 @@ def save(graph, query_master: Path, db_path: Path | None = None, log=print):
         for lk in lks:
             links[lk["props"]["claim_id"]] = lk
             link_stage[lk["props"]["claim_id"]] = stage
+    # one claim written by two stages or twice in one (a table and a passage): one link (common.merge_claims)
+    kept, absorbed, claims_merged = common.merge_claims(links.values())
+    links = {lk["props"]["claim_id"]: lk for lk in kept}
+    claims_merged = {**claims_merged, "absorbed": len(absorbed),
+                     "across_stages": sum(1 for a, k in absorbed.items() if link_stage[a] != link_stage[k])}
     observed = next((lk["props"]["observed_at"] for lk in links.values()), None) or \
         dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -291,7 +296,7 @@ def save(graph, query_master: Path, db_path: Path | None = None, log=print):
         insert("ekg_records", rec_rows)
         insert("ekg_links", link_rows)
         meta = {"graph": str(graphs[0]) if len(graphs) == 1 else json.dumps([str(x) for x in graphs]),
-                "records_merged_across_graphs": dict(merged), "schema_version": reg.schema_version, "registry_sha256": reg.spec_sha256,
+                "records_merged_across_graphs": dict(merged), "claims_merged": claims_merged, "schema_version": reg.schema_version, "registry_sha256": reg.spec_sha256,
                 "built_at": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "observed_at": observed,
                 "records_by_stage": dict(report["records"]), "links_by_stage": dict(report["links"]),
                 "invalid_skipped": dict(report["invalid"]), "indexes_skipped": skipped,
@@ -307,4 +312,4 @@ def save(graph, query_master: Path, db_path: Path | None = None, log=print):
     return {"sqlite": str(db_path), "size_mb": round(db_path.stat().st_size / 1e6, 1),
             "gzip_mb": round(gz.stat().st_size / 1e6, 1), **{k: v for k, v in meta.items()
             if k in ("records_by_stage", "links_by_stage", "invalid_skipped", "indexes_skipped",
-                     "records_merged_across_graphs")}}
+                     "records_merged_across_graphs", "claims_merged")}}

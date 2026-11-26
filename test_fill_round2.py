@@ -81,7 +81,7 @@ def coverage_checks(check):
     g = base.base_graph()
     doc, pieces = spec_doc(g)
     model = Lazy()
-    rep, out, tmp = f1.run_fill(g, model, ["doc_facts"])
+    rep, out, tmp = f1.run_fill(g, model, ["doc_facts"], window=80_000)   # one window: the reply reads 12,000 characters
     recs, links, by_id = base.written(out, tmp)
     got = sorted(r["props"].get("title") for r in recs if r["type"] == "Requirement")
     calls = [p for n, p in model.calls if n == "ekg_doc_facts"]
@@ -105,9 +105,9 @@ def coverage_checks(check):
     g = base.base_graph()
     doc, pieces = spec_doc(g)
     model = Lazy()
-    rep, out, tmp = f1.run_fill(g, model, ["doc_facts"], window=4_500)
+    rep, out, tmp = f1.run_fill(g, model, ["doc_facts"], window=18_000)
     e = [e for e in base.rows(out / "ledger.jsonl") if e["kind"] == "doc_facts"]
-    room = fill_budget.sizes(4_500).room(rep["kinds"]["doc_facts"]["prompt_chars_max"] - rep["kinds"]["doc_facts"]["text_chars_per_window_max"])
+    room = fill_budget.sizes(18_000).room(rep["kinds"]["doc_facts"]["prompt_chars_max"] - rep["kinds"]["doc_facts"]["text_chars_per_window_max"])
     follow = [p for n, p in model.calls if "NOT COVERED YET" in p]
     check("coverage: follow-up readings are smaller windows than the first (several calls when the uncovered text is large)",
           any(r["calls"] > 1 for x in e for r in x["coverage"]["rounds"])

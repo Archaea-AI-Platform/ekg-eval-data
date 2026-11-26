@@ -21,7 +21,7 @@ import json
 import re
 from pathlib import Path
 
-from . import common
+from . import common, extract_schema
 from .common import Graph
 
 # a dotted / hashed / ::-joined name whose last type part is capitalised, then a member: Type#run, pkg.Type.run()
@@ -49,7 +49,7 @@ class CodeIndex:
             return
         if r["type"] == "File" and p.get("path"):
             self.rec[r["id"]] = r
-            self.file_by_path[p["path"]] = r
+            self.file_by_path[extract_schema.repo_path(p["path"])] = r
             self.files_by_name[p["path"].rsplit("/", 1)[-1]].append(r)
         elif r["type"] == "CodeSymbol" and p.get("qualified_name") and p.get("kind") not in SYMBOL_KINDS_SKIPPED:
             self.rec[r["id"]] = r
@@ -93,6 +93,7 @@ class CodeIndex:
         return out, how
 
     def path(self, text: str):
+        text = extract_schema.repo_path(text)   # "/src/a.py": the repository's root, the same file as "src/a.py"
         if "/" in text:
             if text in self.file_by_path:
                 return [self.file_by_path[text]], "path"
