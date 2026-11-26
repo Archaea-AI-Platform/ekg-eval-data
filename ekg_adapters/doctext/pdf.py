@@ -1,4 +1,5 @@
-"""PDF -> DocText: one container per page, tables as tables, the document's own properties as meta.
+"""PDF -> DocText: the text flowing across pages (each block says its page), headings, tables as tables, the
+document's own properties as meta.
 
 With pdfplumber the page's ruled tables are read as tables and the text around them as paragraphs,
 in reading order. Without it, pypdf gives the page's text (a table then comes out as its lines).
@@ -9,11 +10,13 @@ callable `ocr(pdf_bytes, page_index) -> text` that is asked for exactly those pa
 
 from __future__ import annotations
 
+import collections
 import datetime as dt
+import difflib
 import io
 import re
 
-from .model import Block, DocText, Unreadable, Unsupported, nonws
+from .model import Block, DocText, Unreadable, Unsupported, cell_text, nonws
 
 PDF_DATE = re.compile(r"D:(\d{4})(\d\d)?(\d\d)?(\d\d)?(\d\d)?(\d\d)?\s*([Zz+-])?(\d\d)?'?(\d\d)?")
 
@@ -96,8 +99,22 @@ def _cell_lines(words, gap):
     return "\n".join(" ".join(x["text"] for x in sorted(ws, key=lambda x: x["x0"])) for _, ws in rows)
 
 
-def _plumber_page(page, q):
-    """[(top, Block)] for one page: tables with at least two rows and two columns, and the text outside them."""
+BOLD_WORDS = ("bold", "black", "heavy")   # what a font's name says when its weight is bold
+
+
+def _line_style(ln):
+    """(size, bold share) of a text line: its characters' median size and the share of them in a bold face."""
+    chars = [c for c in ln.get("chars", ()) if str(c.get("text", "")).strip()]
+    if not chars:
+        return max(ln["bottom"] - ln["top"], 1.0), 0.0
+    sizes = sorted(float(c.get("size") or 0) for c in chars)
+    bold = sum(1 for c in chars if any(w in str(c.get("fontname", "")).lower() for w in BOLD_WORDS))
+    return sizes[len(sizes) // 2], bold / len(chars)
+
+
+def _plumber_page(page):
+    """One page's tables [(top, Block, bbox)] and its lines outside them [{top, bottom, x0, x1, text, size, bold}].
+    A table has at least two rows and two columns."""
     tables = []
     for t in page.find_tables():
         rows = [[(c or "").strip() for c in r] for r in (t.extract() or [])]
@@ -118,22 +135,200 @@ def _plumber_page(page, q):
     out = []
     for bbox, rows in tables:
         width = max(len(r) for r in rows)
-        out.append((bbox[1], Block("table", rows=[r + [""] * (width - len(r)) for r in rows], header=True)))
-    para, last = [], None
+        out.append((bbox[1], Block("table", rows=[r + [""] * (width - len(r)) for r in rows], header=True), bbox))
+    lines = []
     for ln in rest.extract_text_lines():
         text = ln["text"].strip()
-        if not text:
+        if text:
+            size, bold = _line_style(ln)
+            lines.append({"top": ln["top"], "bottom": ln["bottom"], "x0": ln["x0"], "x1": ln["x1"], "text": text,
+                          "size": size, "bold": bold})
+    return out, lines
+
+
+# ---------------------------------------------------------------- the text flows across pages
+# A PDF is laid out in pages, but what it says runs on across them. So the reader gives no section per page:
+# every block carries its page (meta "page", and "page_end" when it runs onto a later one); the lines every
+# page repeats (running headers and footers, page numbers) are left out; a paragraph or table a page break
+# cuts is put back together; and headings are recovered from how the PDF sets them (size and weight).
+
+DIGITS = re.compile(r"\d+")
+SPACES = re.compile(r"\s+")
+NO_WORD = re.compile(r"[#\W_]")
+NEAR_PAGES = 3   # how many pages before and after a page its running header / footer is looked for on
+
+
+def _mask(text: str) -> str:
+    """A line as running headers and footers are compared: case and spacing ignored, every number the same
+    (the page number in it changes from page to page)."""
+    return SPACES.sub(" ", DIGITS.sub("#", text.casefold())).strip()
+
+
+def _similar(a: str, b: str) -> bool:
+    return a == b or (min(len(a), len(b)) >= 4 and difflib.SequenceMatcher(None, a, b).ratio() >= 0.8)
+
+
+def _furniture(pages, body):
+    """{(page, line index)} of the running headers, footers and page numbers. A candidate is a line at a page's
+    top or bottom edge (nothing on the page above / below it but other candidates), set apart from the text
+    further in by more than its own height (it sits in the margin), and not set as a heading. It is furniture when it is
+    only a number, or when another page has a line at the same edge, at about the same height, with about the
+    same words (numbers aside). Pages are compared with the few pages around them (a running header repeats on
+    the next page, or on the one after when odd and even pages differ), so a long PDF costs no more per page."""
+    cands = collections.defaultdict(list)   # page -> [(line index, edge, top, height, masked text)]
+    for p, (tables, lines) in enumerate(pages):
+        t_top = min((bbox[1] for _, _, bbox in tables), default=None)
+        t_bot = max((bbox[3] for _, _, bbox in tables), default=None)
+        order = sorted(range(len(lines)), key=lambda i: lines[i]["top"])
+        for edge, seq in (("top", order[:3]), ("bottom", order[::-1][:3])):
+            for k, i in enumerate(seq[:2]):
+                ln = lines[i]
+                if (edge == "top" and t_top is not None and ln["top"] > t_top) or \
+                        (edge == "bottom" and t_bot is not None and ln["bottom"] < t_bot) or _is_heading(ln, body):
+                    break
+                # the white between it and what comes next further in (the next line, or a table)
+                inner = [lines[seq[k + 1]]["top"] - ln["bottom"] if edge == "top" else ln["top"] - lines[seq[k + 1]]["bottom"]] \
+                    if k + 1 < len(seq) else []
+                if edge == "top" and t_top is not None:
+                    inner.append(t_top - ln["bottom"])
+                if edge == "bottom" and t_bot is not None:
+                    inner.append(ln["top"] - t_bot)
+                if min(inner, default=float("inf")) <= ln["bottom"] - ln["top"]:
+                    break   # no wider gap than its own height: it is part of the text, not in the margin
+                cands[p].append((i, edge, ln["top"], ln["bottom"] - ln["top"], _mask(ln["text"])))
+    hit = set()
+    for p, mine in cands.items():
+        near = [c for q in range(max(0, p - NEAR_PAGES), p + NEAR_PAGES + 1) if q != p for c in cands.get(q, ())]
+        for i, edge, top, h, key in mine:
+            if not NO_WORD.sub("", key) or any(e2 == edge and abs(t2 - top) <= max(h, h2) and _similar(key, k2)
+                                               for _, e2, t2, h2, k2 in near):
+                hit.add((p, i))
+    out = set()   # only an unbroken run from the edge: a line further in counts when the ones outside it do
+    for p, (_, lines) in enumerate(pages):
+        order = sorted(range(len(lines)), key=lambda i: lines[i]["top"])
+        for seq in (order[:2], order[::-1][:2]):
+            for i in seq:
+                if (p, i) not in hit:
+                    break
+                out.add((p, i))
+    return out
+
+
+def _body_size(pages, skip):
+    """The size most of the document's text is set in: the median over its characters."""
+    sizes = sorted((round(ln["size"], 1), len(ln["text"])) for p, (_, lines) in enumerate(pages)
+                   for i, ln in enumerate(lines) if (p, i) not in skip)
+    total, run = sum(n for _, n in sizes), 0
+    for s, n in sizes:
+        run += n
+        if run * 2 >= total:
+            return s
+    return 0.0
+
+
+def _is_heading(ln, body):
+    """A heading line: bold and set larger than the body text, or much larger. A bold line at the body's size
+    (a table's header row, a label) is not one, nor a long line of large text."""
+    if not body or len(ln["text"]) > 200:
+        return False
+    return (ln["bold"] >= 0.9 and ln["size"] >= 1.08 * body) or ln["size"] >= 1.3 * body
+
+
+def _levels(sizes):
+    """{size: heading level}: the largest size is level 1; sizes within about half a point are one level."""
+    levels, last, n = {}, None, 0
+    for s in sorted(set(sizes), reverse=True):
+        if last is None or last - s > max(0.6, 0.05 * last):
+            n, last = n + 1, s
+        levels[s] = min(n, 6)
+    return levels
+
+
+def _page_blocks(tables, lines, body, levels, skip, p):
+    """[(top, Block, layout)] of one page in reading order: its tables, its headings (a heading line, or lines
+    of one heading size in a row) and its paragraphs (cut where the gap to the next line is wider than a line
+    gap, or where a heading starts or ends)."""
+    out = [(top, b, {"bbox": bbox}) for top, b, bbox in tables]
+    cur, kind, last = [], None, None
+
+    def flush():
+        if cur:
+            if kind == "heading":
+                b = Block("heading", " ".join(ln["text"] for ln in cur), level=levels.get(round(cur[0]["size"], 1), 6))
+            else:
+                b = Block("paragraph", "\n".join(ln["text"] for ln in cur))
+            out.append((cur[0]["top"], b, {"lines": list(cur)}))
+            cur.clear()
+
+    for i in sorted(range(len(lines)), key=lambda i: lines[i]["top"]):
+        if (p, i) in skip:
             continue
-        height = max(ln["bottom"] - ln["top"], 1.0)
-        if para and last is not None and ln["top"] - last > 0.7 * height:   # a gap: a new paragraph
-            out.append((para[0][0], Block("paragraph", "\n".join(t for _, t in para))))
-            para = []
-        para.append((ln["top"], text))
-        last = ln["bottom"]
-    if para:
-        out.append((para[0][0], Block("paragraph", "\n".join(t for _, t in para))))
+        ln = lines[i]
+        k = "heading" if _is_heading(ln, body) else "paragraph"
+        gap = last is not None and ln["top"] - last > 0.7 * max(ln["bottom"] - ln["top"], 1.0)
+        if cur and (gap or k != kind or (k == "heading" and abs(ln["size"] - cur[-1]["size"]) > 0.6)):
+            flush()
+        cur.append(ln)
+        kind, last = k, ln["bottom"]
+    flush()
     out.sort(key=lambda x: x[0])
-    return [b for _, b in out]
+    return out
+
+
+def _continues(prev, nxt, right):
+    """Does a page's last block run on into the next page's first one? A paragraph does when its last line
+    reaches the right edge of the text (a paragraph's own last line stops short of it) and the next page goes
+    on in the same type size; a table does when the next page starts with a table of the same columns."""
+    (_, a, la), (_, b, lb) = prev, nxt
+    if a.kind == "paragraph" and b.kind == "paragraph":
+        end, start = la["lines"][-1], lb["lines"][0]
+        char = (end["x1"] - end["x0"]) / max(len(end["text"]), 1)
+        return end["x1"] >= right - 3 * char and abs(end["size"] - start["size"]) <= 0.6
+    if a.kind == "table" and b.kind == "table":
+        ba, bb = la["bbox"], lb["bbox"]
+        width = max(ba[2] - ba[0], 1.0)
+        return len(a.rows[0]) == len(b.rows[0]) and abs(ba[0] - bb[0]) <= 0.05 * width and abs(ba[2] - bb[2]) <= 0.05 * width
+    return False
+
+
+def _join(prev, nxt, page):
+    """Put the next page's first block onto the end of this one."""
+    (_, a, la), (_, b, lb) = prev, nxt
+    if a.kind == "paragraph":
+        a.text += "\n" + b.text
+        la["lines"] = la["lines"] + lb["lines"]
+    else:
+        rows = b.rows
+        if [cell_text(c).casefold() for c in rows[0]] == [cell_text(c).casefold() for c in a.rows[0]]:
+            rows = rows[1:]   # its header row, repeated on the new page
+        a.rows = a.rows + rows
+        la["bbox"] = lb["bbox"]
+    a.meta["page_end"] = page
+
+
+def _flow(pages, q):
+    """Every page's (tables, lines) -> the document's blocks, flowing across the page breaks. A page read as
+    plain text (a list of blocks: its layout could not be read) is taken as it is."""
+    plain = {p: x for p, x in enumerate(pages) if isinstance(x, list)}
+    pages = [([], []) if p in plain else x for p, x in enumerate(pages)]
+    skip = _furniture(pages, _body_size(pages, set()))
+    if skip:
+        q.dropped["running headers, footers and page numbers (lines)"] += len(skip)
+    body = _body_size(pages, skip)
+    levels = _levels([round(ln["size"], 1) for p, (_, lines) in enumerate(pages) for i, ln in enumerate(lines)
+                      if (p, i) not in skip and _is_heading(ln, body)])
+    rights = sorted(ln["x1"] for p, (_, lines) in enumerate(pages) for i, ln in enumerate(lines) if (p, i) not in skip)
+    right = rights[int(0.95 * (len(rights) - 1))] if rights else 0.0   # the text's right edge (a few lines stick out)
+    blocks = []
+    for p, (tables, lines) in enumerate(pages):
+        here = [(0, b, {}) for b in plain[p]] if p in plain else _page_blocks(tables, lines, body, levels, skip, p)
+        for _, b, _ in here:
+            b.meta["page"] = p + 1
+        if here and blocks and p not in plain and blocks[-1][2] and blocks[-1][1].meta.get("page_end", blocks[-1][1].meta["page"]) == p \
+                and _continues(blocks[-1], here[0], right):
+            _join(blocks[-1], here.pop(0), p + 1)
+        blocks.extend(here)
+    return [b for _, b, _ in blocks]
 
 
 def read_pdf(data: bytes, title=None, ocr=None) -> DocText:
@@ -176,36 +371,37 @@ def read_pdf(data: bytes, title=None, ocr=None) -> DocText:
         q.warn("tables read as text lines (pdfplumber is not installed)")
     try:
         n_pages = len(plumb.pages) if plumb is not None else len(reader.pages)
+        pages = []   # per page: (tables, lines) when its layout was read, else its blocks as plain text
         for i in range(n_pages):
             q.pages += 1
-            blocks = None
+            page = None
             if plumb is not None:
                 try:
-                    blocks = _plumber_page(plumb.pages[i], q)
+                    page = _plumber_page(plumb.pages[i])
+                    if not page[0] and not page[1]:
+                        page = None
                 except Exception as e:   # one bad page: fall back to plain text for it
                     q.warn(f"page {i + 1}: layout not read ({type(e).__name__}), plain text used")
-            if blocks is None:
+            if page is None:
                 try:
                     text = (reader.pages[i].extract_text() or "") if reader is not None else ""
-                    blocks = [Block("paragraph", p) for p in _paragraphs(text)]
+                    page = [Block("paragraph", p) for p in _paragraphs(text)]
                 except Exception as e:
                     q.failed_parts += 1
                     q.warn(f"page {i + 1}: not readable ({type(e).__name__})")
-                    blocks = []
-                    doc.blocks.append(Block("container", container="page", meta={"index": i + 1}))
+                    pages.append([])
                     continue
-            if not blocks and ocr is not None:
+            if not page and ocr is not None:
                 text = ocr(data, i) or ""
-                blocks = [Block("paragraph", p) for p in _paragraphs(text)]
-                if blocks:
+                page = [Block("paragraph", p) for p in _paragraphs(text)]
+                if page:
                     q.ocr_pages += 1
-            doc.blocks.append(Block("container", container="page", meta={"index": i + 1}))
-            if not blocks:
+            if not page:
                 q.empty_pages += 1
-                continue
-            for b in blocks:
-                q.source_chars += nonws(b.text) if b.kind != "table" else sum(nonws(c) for r in b.rows for c in r)
-            doc.blocks.extend(blocks)
+            pages.append(page)
+        doc.blocks = _flow(pages, q)
+        for b in doc.blocks:
+            q.source_chars += nonws(b.text) if b.kind != "table" else sum(nonws(c) for r in b.rows for c in r)
     finally:
         if plumb is not None:
             plumb.close()

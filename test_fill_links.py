@@ -46,8 +46,9 @@ COMMITS = ("Date | SHA | Author | PR | File changed\n"
 MODULES = ("Module | Repository | Primary file\n"
            "PAY-AUTH | payments-platform | src/payments/authorization.py\n"
            "PAY-PROMO | payments-platform | src/pricing/coupons.py")
-ACTIVITY = ("Module | Most commits | Second most\n"
-            "PAY-AUTH | Lionel 42 | Suzan 24\nPAY-PROMO | Alex 23 | Emma 12")
+ACTIVITY = ("Module | Most commits | Second most | Latest merged PR\n"
+            "PAY-AUTH | Lionel 42 | Suzan 24 | #174\nPAY-PROMO | Alex 23 | Emma 12 | #181\n"
+            "PAY-CORE | 4711 9 | Suzan 3 | #999")
 GROUPS = ("Group | Scope / access\n"
           "eng-payments | Payment engineering source write and reviews.\neng-ops | Shipment and warehouse repositories.")
 WIDE = ("Key | Value\nalpha | one\nbeta | two")
@@ -77,7 +78,8 @@ ACTIVITY_MAP = f1.empty_kv(
     row_type="Service", name_column="c1", key_column="none", key_field="none", statement_column="none",
     cell_parts=[{"column": "c2", "parts": 2, "separator": "", "pattern": r"(.+?)\s+(\d+)"},
                 {"column": "c3", "parts": 2, "separator": "", "pattern": r"(.+?)\s+(\d+)"}],
-    links=[link("c2.1", "KNOWS_ABOUT", "Person", row_is="to"), link("c3.1", "KNOWS_ABOUT", "Person", row_is="to")],
+    links=[link("c2.1", "KNOWS_ABOUT", "Person", row_is="to"), link("c3.1", "KNOWS_ABOUT", "Person", row_is="to"),
+           link("c4", "ABOUT", "PullRequest", row_is="to")],   # "#174" with no other_key_field: still the number
     schema_gap="the commit counts per person and module (c2.2, c3.2): no link from a Person to a Service has a count field")
 GROUP_MAP = f1.empty_kv(row_type="Group", name_column="c1", key_column="none", key_field="none", statement_column="none",
                         cell_parts=[], fields=[{"column": "c2", "field": "text"}], links=[], schema_gap="")
@@ -168,8 +170,8 @@ class Tables(f1.Model):
 def table_checks(check):
     g, acct = tool_graph()
     # the commit log comes first in the document: its pull request cells must still find the merge log's rows
-    base.add_doc(g, "activity.pdf", [("Commits", 1, [("table", COMMITS)]), ("Merges", 1, [("table", MERGES)]),
-                                     ("Modules", 1, [("table", MODULES)]), ("Activity", 1, [("table", ACTIVITY)]),
+    base.add_doc(g, "activity.pdf", [("Commits", 1, [("table", COMMITS)]), ("Activity", 1, [("table", ACTIVITY)]),
+                                     ("Merges", 1, [("table", MERGES)]), ("Modules", 1, [("table", MODULES)]),
                                      ("Groups", 1, [("table", GROUPS)]), ("Wide", 1, [("table", WIDE)])])
     f1.Model.tables = {'"PR / module"': MERGE_MAP, '"SHA"': COMMIT_MAP, '"Primary file"': MODULE_MAP, '"Most commits"': ACTIVITY_MAP}
     model = Tables()
@@ -193,8 +195,18 @@ def table_checks(check):
           {("Auth retry audit fields", "src/payments/authorization.py"), ("Coupon reservation guard", "src/pricing/coupons.py")} <= L["CHANGES"])
     check("tables: the pull request cell '#181' is matched by its number (other_key_field) to the one record the merge "
           "log made, although the commit log comes first: rows of every table are written before any table's links",
-          len(prs) == 2 and sorted(p["props"].get("number") for p in prs) == [174, 181]
-          and all(p["props"].get("title") for p in prs))
+          len([p for p in prs if p["props"].get("number")]) == 2 and sorted(p["props"]["number"] for p in prs if p["props"].get("number")) == [174, 181]
+          and all(p["props"].get("title") for p in prs if p["props"].get("number")))
+    check("tables: a pull request cell written as its number ('#174') in a column the mapping gave no key field is that "
+          "numbered record, made by a later table, not a record named '#174' of its own",
+          ("Auth retry audit fields", "PAY-AUTH") in L["ABOUT"] and ("Coupon reservation guard", "PAY-PROMO") in L["ABOUT"]
+          and c.get("PullRequest: a link cell written as its number, the existing record of that number") == 2)
+    check("tables: a number cell ('#999') no record carries makes no record by that number: it is read by name as before",
+          sorted(p["props"].get("number") for p in prs if p["props"].get("number") is not None) == [174, 181]
+          and not any(p["props"].get("number") == 999 for p in prs))
+    check("tables: a person column's number-looking cell ('4711') is never read as a number key: it goes through the "
+          "name checks as any other person cell (a guard: no registry type has both a personal name and a number key today)",
+          not any(k.startswith("Person: a link cell written as") for k in c))
     check("tables: a link end the graph lacks (a File named by its path) is made from the table once, and counted",
           set(files) == {"src/payments/authorization.py", "src/pricing/coupons.py"}
           and c.get("File: created from a table row (no such record from its tool yet)") == 2)

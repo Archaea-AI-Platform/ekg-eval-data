@@ -217,7 +217,7 @@ async def run(args):
                "paged": res.get("paged"), "compactions": res.get("compactions"),
                "calls": len(res.get("tool_calls") or []),
                "tokens": sum(int((res.get("usage") or {}).get(k) or 0) for k in ("prompt_tokens", "completion_tokens")),
-               **{k: res[k] for k in ("question_plan", "budget", "notes") if res.get(k) is not None}}
+               **{k: res[k] for k in ("question_plan", "budget", "notes", "evidence") if res.get(k) is not None}}
         log.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")  # kept at once: a stopped run loses nothing
         log.flush()
         mark = {True: "PASS", False: "FAIL", None: "----"}[verdict["pass"]]

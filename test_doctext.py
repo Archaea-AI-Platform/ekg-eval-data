@@ -226,6 +226,46 @@ def blank_pdf(pages=1) -> bytes:
     return buf.getvalue()
 
 
+def text_pdf(pages) -> bytes:
+    """A PDF written by hand: `pages` is a list of pages, each a list of (y, size, bold, text) lines set at x=50
+    in Helvetica (Helvetica-Bold when bold) on a 612 x 792 page."""
+    objs = ["<< /Type /Catalog /Pages 2 0 R >>", None,
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>"]
+    kids = []
+    for lines in pages:
+        esc = lambda t: t.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+        body = "".join(f"BT /{'F2' if bold else 'F1'} {size} Tf 50 {y} Td ({esc(t)}) Tj ET\n" for y, size, bold, t in lines)
+        objs.append(f"<< /Length {len(body.encode('latin-1'))} >>\nstream\n{body}endstream")
+        objs.append(f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents {len(objs)} 0 R "
+                    f"/Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> >>")
+        kids.append(f"{len(objs)} 0 R")
+    objs[1] = f"<< /Type /Pages /Kids [{' '.join(kids)}] /Count {len(kids)} >>"
+    out, offsets = b"%PDF-1.4\n", []
+    for n, o in enumerate(objs, 1):
+        offsets.append(len(out))
+        out += f"{n} 0 obj\n{o}\nendobj\n".encode("latin-1")
+    xref = len(out)
+    out += f"xref\n0 {len(objs) + 1}\n0000000000 65535 f \n".encode()
+    out += "".join(f"{o:010d} 00000 n \n" for o in offsets).encode()
+    out += f"trailer\n<< /Size {len(objs) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode()
+    return out
+
+
+def flowing_pdf() -> bytes:
+    """Three pages with a running header and footer (the footer numbered), headings in bold at two sizes, a
+    paragraph that runs from page 1 onto page 2, and one that ends just before page 3 starts a new one."""
+    full = "flowing words that fill this whole line of the page from margin to margin, and more of them"
+    head = lambda n: [(760, 8, False, "Handbook of the example team"), (30, 8, False, f"Example handbook | page {n}")]
+    p1 = head(1) + [(700, 16, True, "Overview"), (676, 10, False, "The opening paragraph starts here."),
+                    (650, 10, False, full), (636, 10, False, full), (622, 10, False, full)]
+    p2 = head(2) + [(720, 10, False, "and the sentence ends on the next page."),
+                    (690, 13, True, "Details"), (666, 10, False, full), (652, 10, False, "A short last line.")]
+    p3 = head(3) + [(720, 10, False, "A new paragraph on page three."), (690, 13, True, "More details"),
+                    (666, 10, False, "Text under the second sub-heading.")]
+    return text_pdf([p1, p2, p3])
+
+
 def new_graph():
     g = Graph(observed_at="2026-11-01T00:00:00Z")
     g.ctx["settings"] = {"issue_tracker": None, "public": True}
@@ -409,16 +449,19 @@ def reader_checks(check, tmp: Path):
         for path in pdfs:
             data = path.read_bytes()
             doc = read(data, path.name)
-            pages = [b for b in doc.blocks if b.kind == "container"]
-            want = "".join((pg.extract_text() or "") for pg in pypdf.PdfReader(io.BytesIO(data)).pages)
-            words = [w for w in want.split() if len(w) > 3]
+            pages = {b.meta.get("page") for b in doc.blocks}
+            n_pages = len(pypdf.PdfReader(io.BytesIO(data)).pages)
+            # pypdf's words are all there, but for the running headers and footers: a word left out is on every page
+            texts = [pg.extract_text() or "" for pg in pypdf.PdfReader(io.BytesIO(data)).pages]
+            words = [w for w in " ".join(texts).split() if len(w) > 3]
             flat = "".join(doc.text.split())
-            found = sum(1 for w in words if w in flat)
-            ok = (len(pages) == doc.quality.pages == len(pypdf.PdfReader(io.BytesIO(data)).pages) and doc.quality.empty_pages == 0
+            found = sum(1 for w in words if w in flat or all(w in t for t in texts))
+            ok = (pages == set(range(1, n_pages + 1)) and doc.quality.pages == n_pages and doc.quality.empty_pages == 0
+                  and not any(b.kind == "container" for b in doc.blocks)
                   and found >= 0.99 * len(words) and doc.meta.get("creator") and doc.meta.get("created_at") and doc.title)
             total_tables += doc.quality.tables
-            check(f"pdf: {path.name}: every page a container, {found}/{len(words)} of pypdf's words present, "
-                  f"{doc.quality.tables} tables, author and dates read", ok)
+            check(f"pdf: {path.name}: every block says its page, no page is a section, {found}/{len(words)} of pypdf's "
+                  f"words present, {doc.quality.tables} tables, author and dates read", ok)
         tabled = read(next(p for p in pdfs if "GitHub_Engineering" in p.name))
         tb = next(b for b in tabled.blocks if b.kind == "table")
         check("pdf: a ruled table is a table (rows of cells), rendered a | b | c",
@@ -435,10 +478,33 @@ def reader_checks(check, tmp: Path):
         check("pdf: a cell written on two lines keeps its line break (id and name over the team), as a ruled cell does",
               row[0] == "E003 Lionel\neng-orders" and row[1] == "Software Engineer\nOrder Management" and row[2] == "Mahesh"
               and row[3] == "@lionel\nlionel@acme.com" and "E003 Lionel / eng-orders | Software Engineer / Order Management" in ldoc.text)
+    flow = read_pdf(flowing_pdf())
+    fb = flow.blocks
+    joined = next((b for b in fb if b.text.startswith("flowing words")), None)
+    check("pdf: a running header and a numbered footer repeated on every page are left out, and counted",
+          "Handbook of the example team" not in flow.text and "Example handbook" not in flow.text
+          and sum(flow.quality.dropped.values()) == 6 and flow.quality.ratio == 1.0)
+    check("pdf: headings come from the type (bold and larger than the body), levelled by size",
+          [(b.text, b.level) for b in fb if b.kind == "heading"] == [("Overview", 1), ("Details", 2), ("More details", 2)])
+    check("pdf: a paragraph whose last line reaches the margin runs on across the page break (one block, pages 1-2)",
+          joined is not None and joined.text.endswith("and the sentence ends on the next page.")
+          and joined.meta == {"page": 1, "page_end": 2})
+    check("pdf: a paragraph whose last line stops short ends at the page break",
+          any(b.text == "A new paragraph on page three." and b.meta == {"page": 3} for b in fb)
+          and any(b.text.endswith("A short last line.") and "page_end" not in b.meta for b in fb))
+    chapters = read_pdf(text_pdf([[(760, 8, False, "Running title"), (700, 16, True, f"Chapter {n}"),
+                                   (684, 10, False, "Same closing words on every page.")] for n in range(1, 4)]))
+    check("pdf: a numbered heading at the same place on every page, and a body line repeated next to the text, are kept",
+          [b.text for b in chapters.blocks if b.kind == "heading"] == ["Chapter 1", "Chapter 2", "Chapter 3"]
+          and chapters.text.count("Same closing words on every page.") == 3 and "Running title" not in chapters.text)
+    sections, pieces = docgraph.split_pieces(flow, 4000)
+    check("pdf: sections are the headings, not the pages; a piece says the pages it is on",
+          [s["path"] for s in sections] == ["Overview", "Overview > Details", "Overview > More details"]
+          and [p["pages"] for p in pieces] == [(1, 2), (2, 3), (3, 3)])
     scan = read_pdf(blank_pdf(2))
     check("pdf: pages with no text are counted and warned about, never silently dropped",
           scan.quality.pages == 2 and scan.quality.empty_pages == 2 and scan.quality.ratio == 0.0 and scan.quality.warnings
-          and [b.container for b in scan.blocks] == ["page", "page"])
+          and scan.blocks == [])
     seen = []
     ocr = read_pdf(blank_pdf(2), ocr=lambda data, i: seen.append(i) or (f"recognised page {i + 1}" if i == 0 else ""))
     check("pdf: the ocr hook is asked for exactly the empty pages, and its text is used",

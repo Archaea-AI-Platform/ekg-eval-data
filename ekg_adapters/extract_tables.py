@@ -1220,9 +1220,20 @@ def apply(w, t: Task, e):
         out = []
         ty, key_field = l["other"], l.get("other_key")
         onf = cat.name_field(ty)
+        # the other type's one number key (a pull request's number), for a column the mapping gave no key field: a
+        # cell written in that key's form ("#246", "246") names the existing record of that number. It only finds:
+        # with no such record the cell is read as before (by name), and a person's name column is never read so
+        numbered = [f for f, s in cat.key_fields(ty).items() if s.type == "number" and f != onf] \
+            if not key_field and onf != PERSONAL_NAME else []
         for val in values(raw, l["split"]):
             if placeholder(val):
                 c["placeholder cell (-, n/a ...): no link end, left out"] += 1
+                continue
+            num = _NUMBER_KEY.fullmatch(val.strip()) if len(numbered) == 1 else None
+            hits = v.by_field(ty, numbered[0], int(num.group(1))) if num else []
+            if len(hits) == 1:
+                c[f"{ty}: a link cell written as its {numbered[0]}, the existing record of that {numbered[0]}"] += 1
+                out.append(hits[0])
                 continue
             props = {onf: val.lstrip("@")} if onf else {}
             if key_field:
@@ -1401,6 +1412,7 @@ def apply(w, t: Task, e):
     return None
 
 
+_NUMBER_KEY = re.compile(r"#?(\d+)")   # a cell written as a number key: "#246", "246"
 THIN = "a bare first name"   # obtain()'s answer for a name it may not create a record from
 
 
