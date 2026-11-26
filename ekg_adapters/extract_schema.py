@@ -17,7 +17,11 @@ The registry is the schema; this module only asks it questions. The rules, all i
               document may state facts about things it can define; facts purely between tool records belong
               to those tools' adapters. An `any` end is a catch-all and does not count as a match.
 
-Internals and access types never take part.
+Internals never take part. A type of the access layer (pillar "access": the places a tool's permissions are kept
+by) takes part only when its registry `source` says a document describes one (SOURCE_WORDS) and it has a name field: a
+scope a directory or document describes. Such a type is offered only as the far end of the access layer's grant
+(GRANT_LINK), and the writer (fill.Writer) lets a grant from a document end only at a scope this stage made from a
+document, never at a tool's own place: a document never changes who can see what.
 """
 
 from __future__ import annotations
@@ -40,6 +44,8 @@ TEXT_FIELDS = ("statement", "text", "summary")                                  
 LOOKUP_FIELDS = ("display_name", "preferred_name", "work_email", "handle", "normalized_value", "aliases", "emails",
                  "value", "domain")
 SKIP_PILLARS = {"internals", "access"}
+ACCESS_PILLAR = "access"   # the access layer: its records decide visibility (see the module docstring)
+GRANT_LINK = "CAN_ACCESS"  # the access layer's grant: the one link a document may state to a scope of that layer
 # the registry's field for where a record (a file, a folder, a test) is inside its repository or store
 PATH_FIELD = "path"
 DOCUMENT_TYPES = ("Document", "File", "DocSection", "Piece")
@@ -71,6 +77,10 @@ class Catalog:
         self._schema_cache = {}
         self.budget = None   # fill_budget.Budget the prompts' schema sections are sized by (set by View.catalog)
         usable = {n: t for n, t in reg.records.items() if not set(t.pillars) <= SKIP_PILLARS}
+        # a type of the access layer a directory or document describes (its source says so, and it has a name)
+        self.access_types = sorted(n for n, t in reg.records.items() if set(t.pillars) <= SKIP_PILLARS
+                                   and ACCESS_PILLAR in t.pillars and SOURCE_WORDS.search(t.source or "") and names_of(t))
+        usable.update({n: reg.records[n] for n in self.access_types})
         self.origin_links = [lk for lk in reg.links.values() if lk.relation == ORIGIN_RELATION and not lk.internal
                              and set(lk.to_types) & set(DOCUMENT_TYPES)]
         stated = {n for n in usable for lk in self.origin_links if any(reg.is_a(n, ft) for ft in lk.from_types if ft != "any")}
@@ -88,10 +98,10 @@ class Catalog:
                 continue
             # an `any` end is a catch-all: it counts for the types a document states (a requirement ABOUT the service
             # it is about), never for every type, which would offer each link between everything
-            a = [t for t in known if any(reg.is_a(t, x) for x in lk.from_types if x != "any")
-                 or ("any" in lk.from_types and t in stated_named)]
-            b = [t for t in known if any(reg.is_a(t, x) for x in lk.to_types if x != "any")
-                 or ("any" in lk.to_types and t in stated_named)]
+            a = [t for t in known if (any(reg.is_a(t, x) for x in lk.from_types if x != "any")
+                 or ("any" in lk.from_types and t in stated_named)) and self.access_end(name, t, "from")]
+            b = [t for t in known if (any(reg.is_a(t, x) for x in lk.to_types if x != "any")
+                 or ("any" in lk.to_types and t in stated_named)) and self.access_end(name, t, "to")]
             named_ends = set(lk.from_types) | set(lk.to_types) | (stated_named if "any" in set(lk.from_types) | set(lk.to_types) else set())
             if a and b and set(self.creatable) & named_ends:
                 self.links[name] = (a, b)
@@ -104,10 +114,17 @@ class Catalog:
         for name, lk in sorted(reg.links.items()):
             if lk.internal or lk.relation == ORIGIN_RELATION or set(lk.pillars) <= SKIP_PILLARS:
                 continue
-            a = [t for t in self.table_types if any(reg.is_a(t, x) for x in lk.from_types if x != "any")]
-            b = [t for t in self.table_types if any(reg.is_a(t, x) for x in lk.to_types if x != "any")]
+            a = [t for t in self.table_types if any(reg.is_a(t, x) for x in lk.from_types if x != "any")
+                 and self.access_end(name, t, "from")]
+            b = [t for t in self.table_types if any(reg.is_a(t, x) for x in lk.to_types if x != "any")
+                 and self.access_end(name, t, "to")]
             if a and b:
                 self.table_links[name] = (a, b)
+
+    def access_end(self, link, rtype, side) -> bool:
+        """May a document put a record of `rtype` at this end of `link`? Any type outside the access layer; a type of
+        it (access_types) only as the far end of the grant (GRANT_LINK)."""
+        return rtype not in self.access_types or (link == GRANT_LINK and side == "to")
 
     @staticmethod
     def _named(t, names):

@@ -207,6 +207,12 @@ class StandIn:
     def ekg_knowledge_extract(self, prompt, schema):
         return {"items": []}
 
+    def ekg_depends_on(self, prompt, schema):   # what an item waits on (extract_gates): none, unless a test says
+        return {"links": []}
+
+    def ekg_grant_level(self, prompt, schema):   # the level of a stated grant (extract_gates): not stated, unless a test says
+        return {"verdict": "reject", "choice": "none", "quote": "", "cue": "", "reason": "test"}
+
 
 def run_fill(g, model, kinds, window=20_000, concurrency=16, out=None, report=None, **kw):
     """fill.run on a graph written to a temp folder, with the stand-in in place of query-master's client."""

@@ -509,8 +509,9 @@ def id_checks(check):
     cat = View(list(g.records.values()), [lk for lk, _, _ in g.links.values()]).catalog()
     check("ids: a link with an `any` end is offered for the types a document states (a Requirement ABOUT a Service)",
           "Requirement" in cat.links["ABOUT"][0] and "Service" in cat.links["ABOUT"][1] and "Person" not in cat.links["ABOUT"][0])
-    check("ids: no model call was made for the references (every call is a document reading)",
-          all(n == "ekg_doc_facts" for n, _ in model.calls))
+    check("ids: no model call was made for the references (every call is a document reading, or the question of what "
+          "an item waits on, extract_gates)",
+          all(n in ("ekg_doc_facts", "ekg_depends_on") for n, _ in model.calls))
     check("ids: every written record and link validates", not base.all_valid(recs, links, by_id))
 
 

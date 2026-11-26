@@ -226,12 +226,14 @@ def table_checks(check):
           not any(";" in str(p) for p in persons)
           and c.get("Person: a cell that holds more than a name (\"Jonathan; Ben for infrastructu\"), not created and not linked") == 1)
     check("people: 'Noah 26' on OPS-FULF is Noah Patel (OPS-FULF is already OWNED_BY him), 'Maya 29' on OPS-PACK is "
-          "Maya Chen; 'Maya 11' on OPS-FULF and 'Priya 8' on OPS-PACK have no corroborating link: not linked, counted",
-          {("Noah Patel", "OPS-FULF"), ("Maya Chen", "OPS-PACK")} <= know
-          and ("Maya Chen", "OPS-FULF") not in know and ("Priya Nair", "OPS-PACK") not in know
+          "Maya Chen; 'Maya 11' on OPS-FULF is Maya Chen too (the same table settled 'Maya' in another row); 'Priya 8' "
+          "on OPS-PACK has no corroborating link in the graph or the table: not linked, counted",
+          {("Noah Patel", "OPS-FULF"), ("Maya Chen", "OPS-PACK"), ("Maya Chen", "OPS-FULF")} <= know
+          and ("Priya Nair", "OPS-PACK") not in know
           and c.get("Person: a bare first name, the one record whose name starts with it, already linked to the row's record") == 2
+          and c.get("Person: a bare first name the same table settled in another row: that record") == 1
           and c.get("Person: a bare first name, one record could be it but nothing links it to the row's record yet: not "
-                    "linked (not created)") == 2)
+                    "linked (not created)") == 1)
     mentions = {(a, b) for a, b, _ in L["MENTIONS"]}
     check("people: the commit-count piece MENTIONS the module and the people it names (a record result can point to it)",
           any(b == "Noah Patel" for _, b in mentions) and any(b == "OPS-FULF" for _, b in mentions))

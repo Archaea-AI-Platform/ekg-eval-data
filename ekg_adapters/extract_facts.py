@@ -62,10 +62,11 @@ ASK = ("List every record and every link this text states, using only the record
        "- A text that speaks for a team (\"we\", \"our team\") states facts about the team the document is by, as its "
        "title or first heading names it: list that team by that name, and link what the text says the team owns, runs, "
        "decides or is the contact for, by the link type whose description says so.\n"
-       "- A thing the text refers to by an id or a proper name of its own (a case, an order, an incident, a programme "
-       "...) for which no more specific listed type fits is a Topic named by that id alone, or that name, as written "
+       "- A thing the text refers to by an id or a proper name of its own (a case, an order, a programme ...) for which "
+       "no more specific listed type fits is a Topic named by that id alone, or that name, as written "
        "(a heading is a place in the document, not a Topic). List it "
-       "wherever it is mentioned and link the items about it to it (ABOUT).\n"
+       "wherever it is mentioned and link the items about it to it (ABOUT): what the text recounts happening to it (an "
+       "incident, with its times) is a record of its own listed type, ABOUT it.\n"
        "- The document itself is a record too: when the text says who owns, maintains or wrote this document, list it "
        "with type File and the document's title exactly as shown after DOCUMENT:, and link it.\n"
        "{worth}\n"
@@ -89,9 +90,19 @@ def worth_keeping(catalog) -> str:
         kind = rt.fields.get("kind")
         line = f"  {t}: {about}" + (f". Its kinds: {kind.about}" if kind is not None and kind.enum and kind.about else "")
         rows.append(line)
-    return ("- WORTH KEEPING: explanatory prose holds these as much as numbered lists do. Every statement of one of "
-            "the types below is an item, wherever it is written (a paragraph, a list item, a note under a heading), "
-            "even when nothing numbers it or calls it a rule or a requirement:\n" + "\n".join(rows))
+    out = ("- WORTH KEEPING: explanatory prose holds these as much as numbered lists do. Every statement of one of "
+           "the types below is an item, wherever it is written (a paragraph, a list item, a note under a heading), "
+           "even when nothing numbers it or calls it a rule or a requirement:\n" + "\n".join(rows))
+    from .extract_schema import GRANT_LINK
+    if GRANT_LINK in catalog.links:   # the registry lets a document describe access (extract_schema's docstring)
+        scopes = " or ".join(t for t in catalog.links[GRANT_LINK][1] if t in catalog.access_types)
+        out += (f"\n- ACCESS: what a group, role or account may reach (read, write, review, approve ...), as the text "
+                f"states it, is a {GRANT_LINK} link from it to a {scopes}: the one the text names, else one named by the "
+                "words that say what is reached, with the text's words about it (what it covers, what it does not) as "
+                "its text. Its level is the listed value for what the text says may be done there, in the text's own words "
+                "(to read or view, to comment, to write, change or push, to administer); leave the level out only when "
+                "the text says nothing about what may be done.")
+    return out
 
 
 def _ask(catalog):
@@ -549,6 +560,9 @@ def apply(w, t: Task, e):
                     if found:
                         break
         found = found or (find(w, x["name"], rtype, tool) if named else [])
+        if any(w.tool_access_record(r) for r in found):   # a tool's own place is never what a document names
+            found = [r for r in found if not w.tool_access_record(r)]
+            c[f"{rtype}: a tool's own place of that name left alone (a document describes its own scope)"] += 1
         # a numbered item stated again in the same document (its own id written in the passage: a follow-up reading
         # of a paragraph, or the next window) is the record already made for it, never a second one
         item_key = None
@@ -778,8 +792,9 @@ def _write_link(w, t, l, a, b, tool, quality):
         return
     own, offered = {}, cat.link_fields(ltype)
     for f, val in l["fields"]:
-        if f in offered and str(val).strip() in offered[f]:
-            own[f] = str(val).strip()
+        hit = next((x for x in offered.get(f, ()) if x.casefold() == str(val or "").strip().casefold()), None)
+        if hit is not None:   # a listed value, whatever its letter case ("Write" is write)
+            own[f] = hit
         elif str(val or "").strip():
             c["link field the schema does not offer or value not allowed: left out"] += 1
     how = min((a["how"], b["how"]), key=["chosen", "new", "one"].index)
@@ -922,60 +937,32 @@ def _runs_into(text, b, cited):
     return False
 
 
-# ---------------------------------------------------------------- hand-overs read from dated owners (code only)
-
-OWNER_RELATION = "OWNED_BY"     # the registry's relation of the links that say who owns or is accountable for a thing
-HANDOVER_SIDES = ("HANDOVER_OF", "HANDOVER_FROM", "HANDOVER_TO")   # the registry's links from a Handover, in that order
-SUCCESSOR_LINK = "SUCCEEDS"
-
-
-def derive_handovers(w):
-    """After every document and table is read: where one owner's dated interval of a thing ends on the very day
-    another owner's begins (OWNED_BY Suzan from 2026-10-08, after Mahesh until 2026-10-08), responsibility
-    passed from one to the other then. That is written as the registry has it: a Handover (at, status done, or
-    planned when it lies after the graph's observed time) HANDOVER_OF the thing, HANDOVER_FROM the earlier owner
-    and HANDOVER_TO the later one, the later owner SUCCEEDS the earlier one (at), every link citing the two owner
-    links' evidence. Only the intervals the graph already holds are read: an undated owner, or a gap between two
-    intervals, says nothing about a hand-over. Code only, no model call."""
-    reg, out = common._reg, collections.Counter()
-    if not all(n in reg.links for n in (*HANDOVER_SIDES, SUCCESSOR_LINK)) or "Handover" not in reg.records:
-        return {"skipped": "the registry has no Handover or its links"}
-    owners = collections.defaultdict(list)   # (thing, link type) -> [(from, to, owner id, evidence)]
-    for lk, _, _ in list(w.g.links.values()):
-        spec = reg.links.get(lk["type"])
-        if spec is None or spec.relation != OWNER_RELATION:
+def about_own_case(w):
+    """After every document is read: a stated record (an incident, a requirement ...) whose own id (own_id: the id
+    its name or statement starts with) is exactly the name of ONE Topic is ABOUT that Topic: a thing named by an id
+    of its own is a Topic named by that id (the document prompt's rule), and an item that carries the id as its own
+    is about it. What the text states, matched in code; no model call, nothing inferred beyond the id written."""
+    cat, reg, v = w.v.catalog(), common._reg, w.v
+    out = collections.Counter()
+    v._index()
+    topics = collections.defaultdict(list)
+    for r in w.g.records.values():
+        if r["type"] == HUB_TYPE and r["props"].get("name"):
+            topics[r["props"]["name"]].append(r)
+    for r in [x for x in w.g.records.values() if x["type"] in set(cat.stated)]:
+        case = own_id(r, cat)
+        hits = topics.get(case or "", [])
+        if len(hits) != 1:
+            if len(hits) > 1:
+                out["several Topics carry the id: not linked"] += 1
             continue
-        p = lk["props"]
-        owners[(lk["a"], lk["type"])].append((p.get("valid_from"), p.get("valid_to"), lk["b"], p.get("evidence") or []))
-    seen = set()
-    for (thing, ltype), rows in sorted(owners.items()):
-        for f1, t1, a, ev1 in rows:
-            for f2, t2, b, ev2 in rows:
-                if not t1 or t1 != f2 or a == b or (thing, a, b, t1) in seen:
-                    continue
-                seen.add((thing, a, b, t1))
-                out[_handover(w, reg, thing, a, b, t1, sorted(set(ev1) | set(ev2)))] += 1
+        t = hits[0]
+        if not reg.link_allows("ABOUT", r["type"], t["type"]):
+            continue
+        if any(lk["type"] == "ABOUT" and lk["b"] == t["id"] for lk in v.out.get(r["id"], [])):
+            out[f"{r['type']} already ABOUT its own case"] += 1
+            continue
+        src = next((s for s, _ in _quotes(r) if s in w.by_id), None)
+        why = w._link("ABOUT", r, t, [src] if src else [], "own_case", "reference", 1.0, method="text_rule")
+        out[f"{r['type']} ABOUT the Topic of its own id: " + ("written" if why is None else "not written, " + why[:80])] += 1
     return dict(out)
-
-
-def _handover(w, reg, thing, a, b, at, evidence):
-    rx, ra, rb = w.by_id.get(thing), w.by_id.get(a), w.by_id.get(b)
-    src = next((w.by_id[e] for e in evidence if e in w.by_id), None)
-    if None in (rx, ra, rb, src):
-        return "an end or its evidence is not in the graph: not written"
-    if not (reg.link_allows("HANDOVER_OF", "Handover", rx["type"]) and reg.link_allows("HANDOVER_FROM", "Handover", ra["type"])
-            and reg.link_allows("HANDOVER_TO", "Handover", rb["type"]) and reg.link_allows(SUCCESSOR_LINK, rb["type"], ra["type"])):
-        return f"the registry has no hand-over from a {ra['type']} to a {rb['type']} of a {rx['type']}: not written"
-    status = "planned" if at > (w.g.observed_at or at) else "done"
-    native = "handover:" + hashlib.sha1(f"{thing}|{a}|{b}|{at}".encode()).hexdigest()[:16]
-    rec, why = w.new_record("Handover", "derived", native, {"at": at, "status": status}, src)
-    if why:
-        return f"Handover not created, {why[:80]}"
-    for ltype, end in zip(HANDOVER_SIDES, (rx, ra, rb)):
-        if (why := w._link(ltype, rec, end, evidence, "handover", "reference", 1.0, method="text_rule")):
-            for cid in [cid for cid, (lk, _, _) in w.g.links.items() if lk["a"] == rec["id"]]:
-                del w.g.links[cid]
-            w.drop_record(rec)
-            return f"Handover {ltype} not written, {why[:80]}"
-    why = w._link(SUCCESSOR_LINK, rb, ra, evidence, "handover", "reference", 1.0, method="text_rule", at=at)
-    return "Handover written" + ("" if why is None else f"; SUCCEEDS not written, {why[:80]}")

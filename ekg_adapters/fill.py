@@ -38,10 +38,11 @@ import unicodedata
 from pathlib import Path
 
 from . import common, fill_budget, fill_docs, llm
+from .extract_schema import ACCESS_PILLAR, SKIP_PILLARS
 from .common import Graph
 from .fill_tasks import BUILDERS, DEFAULT_KINDS, GUIDELINE_STRENGTH, KNOWLEDGE_KINDS, Task, View, _ordered
 
-PROMPT_VERSION = "fill-v6"  # a verdict from another version is asked again (responses.jsonl still answers an unchanged prompt)
+PROMPT_VERSION = "fill-v7"  # a verdict from another version is asked again (responses.jsonl still answers an unchanged prompt)
 
 # How sure a written fact is, by how it was established. These are PRIORS, set by judgement: replace each with
 # the accuracy measured for its row on the evaluation set. The model's own opinion of itself is never used.
@@ -546,6 +547,9 @@ async def settle(t: Task, responses: Responses, v=None):
     if t.kind == "table_map":
         from . import extract_tables
         return await extract_tables.settle(t, ask, v.catalog())
+    if t.kind == "depends_on":
+        from . import extract_gates
+        return await extract_gates.settle(t, ask)
     if t.kind not in EXTRACTS:
         return check(t, await ask(judge_prompt(t), f"ekg_{t.kind}", judge_schema(t.labels())))
     got, failed = await ask_split(ask, t.sources, lambda ss: extract_prompt(t, ss), "ekg_knowledge_extract", extract_schema)
@@ -673,7 +677,19 @@ class Writer:
             self.g.records.pop(key, None)
             self.by_id.pop(rec["id"], None)
 
+    def made_here(self, rec) -> bool:
+        """Was this record made by this stage (from a document), not by a tool's adapter?"""
+        return rec["props"]["_key"] not in self.old_records
+
+    def tool_access_record(self, rec) -> bool:
+        """A record of the access layer a tool's adapter made (a tool's own place): never matched, patched or linked
+        to by this stage, so what a document says never changes who can see what (extract_schema's module docstring)."""
+        pillars = set(common._reg.record(rec["type"]).pillars)
+        return pillars <= SKIP_PILLARS and ACCESS_PILLAR in pillars and not self.made_here(rec)
+
     def _link(self, ltype, a, b, evidence, task_kind, how="chosen", quality=1.0, method="llm_judge", **own):
+        if self.tool_access_record(a) or self.tool_access_record(b):
+            return "access: a document never links to a tool's own place (it would change who can see what)"
         evidence = [i for i in _ordered(evidence) if i and self.by_id[i]["props"]["source_tool"] != "derived"]  # R51
         new = len(self.g.links)
         lk = self.g.link(ltype, a, b, method, confidence(how, quality), evidence=evidence, rule_id=self.run_of(task_kind)["id"],
@@ -701,6 +717,12 @@ class Writer:
         if t.kind == "entity_choice":
             from . import extract_facts
             return extract_facts.apply_choice(self, t, e)
+        if t.kind == "depends_on":
+            from . import extract_gates
+            return extract_gates.apply(self, t, e)
+        if t.kind == "grant_level":
+            from . import extract_gates
+            return extract_gates.apply_level(self, t, e)
         subj = self.by_id[t.subject]
         if "field" in t.write:
             return self._field(t, e, subj)
@@ -1071,7 +1093,7 @@ def run(graph: Path, query_master: Path, out: Path | None = None, kinds=None, li
 
     responses = Responses(out / "responses.jsonl", report["model"], concurrency)
     from . import extract_tables
-    extract_tables.MAPPINGS = extract_tables.MappingCache(out / "table_mappings.json") if mode == "run" else None
+    extract_tables.MAPPINGS = extract_tables.MappingCache(out / "table_mappings.json", common._reg.spec_sha256) if mode == "run" else None
     log(f"  {len(responses.seen):,} responses kept from earlier runs")
 
     if mode == "smoke":
@@ -1194,6 +1216,8 @@ def run(graph: Path, query_master: Path, out: Path | None = None, kinds=None, li
             w.table_links = []
             extract_tables.resolve_thin(w)   # bare first names, now that every table's links are in
             report["kinds"]["table_map"]["mappings_from_cache"] = extract_tables.MAPPINGS.hits if extract_tables.MAPPINGS else 0
+            report["kinds"]["table_map"]["mappings_asked_again_for_a_new_schema"] = extract_tables.MAPPINGS.stale if extract_tables.MAPPINGS else 0
+            report["kinds"]["table_map"]["earlier_mappings_kept_new_read_less"] = extract_tables.MAPPINGS.kept_earlier if extract_tables.MAPPINGS else 0
             entries = [(t, seen.get(t.id) or {}) for t in built["table_map"][0]]
             mapped = {u for t, e in entries if e.get("status") == "accepted" and not (e.get("mapping") or {}).get("also_text")
                       for u in t.write["units"]}
@@ -1221,14 +1245,24 @@ def run(graph: Path, query_master: Path, out: Path | None = None, kinds=None, li
             ask_and_apply(choices, "Names with several matches")
             for t in choices:
                 extract_facts.not_chosen(w, t)
+        if "doc_facts" in built:
+            # what each requirement or rule waits on, now that every document's items are in: the model chooses
+            # among the records code proposes (extract_gates)
+            from . import extract_gates
+            gates, why_not = extract_gates.build(w, BUDGET.prompt_chars)
+            report["kinds"]["depends_on"] = {"to_ask": len(gates), "calls_per_task": 1, **dict(why_not)}
+            ask_and_apply(gates, "What requirements and rules wait on")
+            levels = extract_gates.level_tasks(w)
+            report["kinds"]["grant_level"] = {"to_ask": len(levels), "calls_per_task": 1}
+            ask_and_apply(levels, "The level a stated grant gives")
         if "doc_facts" in built or "table_map" in built:
             # last, in code only: a record that cites another record's id (one requirement naming another, in any
             # document) is linked to it, now that every document has been read
             from . import extract_facts
             report["id_references"] = extract_facts.link_cited_ids(w)
             log(f"  id references: {json.dumps(report['id_references'], ensure_ascii=False)[:400]}")
-            report["handovers"] = extract_facts.derive_handovers(w)
-            log(f"  hand-overs from dated owners: {json.dumps(report['handovers'], ensure_ascii=False)[:400]}")
+            report["own_case"] = extract_facts.about_own_case(w)
+            log(f"  items ABOUT the case of their own id: {json.dumps(report['own_case'], ensure_ascii=False)[:400]}")
     finally:
         responses.close()
     report["calls"] = {"made": responses.calls, "answered_from_responses": responses.hits,

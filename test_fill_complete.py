@@ -6,7 +6,7 @@
      never a heading of the document, and an existing record's name is that record;
   3. the document itself, listed by its title as shown, is the document's own record (who maintains it);
   4. a value a text states for an existing record's field (a person's status) is given to it when it has none;
-  5. two dated owners of one thing, the second starting the day the first ends, give a Handover and SUCCEEDS.
+  5. two dated owners of one thing give no computed Handover: the graph holds what the sources state.
 
     python -I ekg-eval-data/test_fill_complete.py
 """
@@ -134,15 +134,11 @@ def reading_checks(check):
           dana and "status" not in dana[0]["props"])
     check("document: the title exemption holds only for the document's own type: no Topic named after the document",
           not any(r["type"] == "Topic" and name(r) == "ops" for r in recs))
-    hand = [r for r in recs if r["type"] == "Handover"]
-    ends = {lk["type"]: name(by_id[lk["b"]]) for lk in links if hand and lk["a"] == hand[0]["id"]}
-    succ = [lk for lk in links if lk["type"] == "SUCCEEDS"]
-    check("hand-over: Lionel's interval ends the day Suzan's starts: one Handover (at, done) of PAY-AUTH from Lionel to Suzan",
-          len(hand) == 1 and hand[0]["props"].get("at") == "2026-10-08T00:00:00Z" and hand[0]["props"].get("status") == "done"
-          and ends == {"HANDOVER_OF": "PAY-AUTH", "HANDOVER_FROM": "Lionel Ortiz", "HANDOVER_TO": "Suzan Kay"})
-    check("hand-over: Suzan SUCCEEDS Lionel at that time; the undated owner link makes no second hand-over",
-          len(succ) == 1 and name(by_id[succ[0]["a"]]) == "Suzan Kay" and name(by_id[succ[0]["b"]]) == "Lionel Ortiz"
-          and succ[0]["props"].get("at") == "2026-10-08T00:00:00Z" and rep["handovers"] == {"Handover written": 1})
+    owners = [lk for lk in base.rows(tmp / "links.jsonl") if lk["type"] == "OWNED_BY" and lk["props"].get("valid_from")]
+    check("hand-over: none is computed from two dated owners (no Handover, no SUCCEEDS); the dated OWNED_BY links stay "
+          "for the reader to reason over",
+          not any(r["type"] == "Handover" for r in recs) and not any(lk["type"] == "SUCCEEDS" for lk in links)
+          and len(owners) == 2 and "handovers" not in rep)
     check("topic: a case named with words after its id is named by the id alone (one O-8201, no 'O-8201 / early capture')",
           not any(r["type"] == "Topic" and "early capture" in name(r) for r in recs))
     check("topic: a heading of the document is never a Topic; an existing team's name is that team, not a Topic beside it",
