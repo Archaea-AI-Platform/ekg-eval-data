@@ -177,11 +177,13 @@ class View:
         if spec is None:
             return
         p = r["props"]
+        rooted = extract_schema.has_path(common._reg, r["type"])   # "/src/a.py" is also found as "src/a.py"
         for f in [*extract_schema.names_of(spec), *extract_schema.LOOKUP_FIELDS]:
             val = p.get(f)
             for x in val if isinstance(val, list) else [val]:
-                if isinstance(x, str) and (k := name_key(x)) and r["id"] not in self._names[k]:
-                    self._names[k].append(r["id"])
+                for y in {x, extract_schema.repo_path(x)} if rooted else {x}:
+                    if isinstance(y, str) and (k := name_key(y)) and r["id"] not in self._names[k]:
+                        self._names[k].append(r["id"])
         for f in extract_schema.names_of(spec):
             if isinstance(p.get(f), str) and QUALIFIED.fullmatch(k := name_key(p[f])):
                 self._tail[k.rsplit("/", 1)[1]][r["id"]] = None
@@ -199,7 +201,7 @@ class View:
             idx = self._fields[(rtype, field)] = collections.defaultdict(list)
             for r in self.by_type[rtype]:
                 self.index_field(r, field, idx)
-        k = _field_key(value)
+        k = _field_key(extract_schema.repo_path(value) if field == extract_schema.PATH_FIELD else value)
         hits = idx.get(k, [])
         if not hits and len(k) >= 7:
             longer = [ids for stored, ids in idx.items() if stored.startswith(k)]
@@ -210,6 +212,8 @@ class View:
         """Add one record to the (type, field) index (a record this stage just made)."""
         idx = self._fields.get((r["type"], field)) if idx is None else idx
         val = r["props"].get(field)
+        if field == extract_schema.PATH_FIELD:   # "/src/a.py" and "src/a.py": one path (repo_path)
+            val = extract_schema.repo_path(val)
         if idx is not None and val is not None and r["id"] not in idx[_field_key(val)]:
             idx[_field_key(val)].append(r["id"])
 
@@ -309,6 +313,9 @@ class View:
         through the records of the same identity (an address -> its account -> its person). Several records of
         one person (their accounts in different tools) count as one: the one in `prefer_tool`, else the first by key."""
         hits = [self.rec[i] for i in self._index().get(name_key(name), ())]
+        if extract_schema.repo_path(name) != name:   # a rooted path ("/src/a.py"): also a record of a type with a path
+            hits += [self.rec[i] for i in self._names.get(name_key(extract_schema.repo_path(name)), ())
+                     if extract_schema.has_path(common._reg, self.rec[i]["type"]) and self.rec[i] not in hits]
         found = [r for r in hits if r["type"] in types]
         seen, frontier = {r["id"] for r in hits}, hits
         for _ in range(2):

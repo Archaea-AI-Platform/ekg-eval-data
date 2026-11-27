@@ -412,6 +412,135 @@ class Graph:
                 f.write(json.dumps(lk, ensure_ascii=False) + "\n")
 
 
+# ---------------------------------------------------------------- one claim, once
+
+# what a link carries about its own writing, not about the fact: left out when two claims are compared
+CLAIM_BOOKKEEPING = {"claim_id", "predicate", "canon_dir", "method", "confidence", "evidence", "support_count",
+                     "at_source", "observed_at", "rule_id", "derived", "_stated", "valid_from", "valid_to",
+                     "valid_from_precision", "valid_to_precision"}
+CLAIM_DEFAULTS = {"status": "active", "support": "any"}   # as the store reads a link that does not say
+
+
+def _claim_values(lk):
+    p = lk["props"]
+    out = {**CLAIM_DEFAULTS, **{k: v for k, v in p.items() if k not in CLAIM_BOOKKEEPING and v is not None}}
+    return {k: json.dumps(v, sort_keys=True, ensure_ascii=False) for k, v in out.items()}
+
+
+def _within(small, big):
+    return all(k in big and big[k] == v for k, v in small.items())
+
+
+def merge_claims(links):
+    """The same claim written twice, made one (R24: same fact, one link), beyond what the fact key already joins.
+
+    Two links of one type between the same two records, with the same interval, where every value one states the
+    other states too (its own fields, status, support, at; the writer's bookkeeping aside): the one that says more
+    keeps its claim_id, and takes the other's evidence (united), sightings (support_count, summed) and the higher
+    confidence, as store.put_link does for a repeat. Two tables writing one stewardship, one with an aspect: one claim.
+    An undated link (no valid_from, no valid_to) whose values the ONE dated link of that type between those records
+    states too, when that interval is open (no valid_to) and had begun when the undated one was seen (observed_at),
+    is the same claim without its dates: merged into it the same way. Only links with the same acl and
+    scope_override are ever compared (a claim visible to fewer people stays its own). Sightings are summed and the
+    higher confidence taken only between claims of the same method and at_source; a claim read another way (a
+    table's and a passage's) gives only its evidence, so no reading vouches for another's confidence.
+    Never merged: links whose values disagree (a role of escalation and a role of point_of_contact from one piece:
+    two claims, counted as conflicting), a link several others could each be the fuller form of (ambiguous), and an
+    undated link that states something the dated one does not.
+    Returns (links, absorbed, report): the links kept (a merged one is a new dict), {absorbed claim_id: kept
+    claim_id}, and the counts. A link bound to an absorbed one (bound_link) is bound to the one kept."""
+    links = list(links)
+    by_end = collections.defaultdict(list)
+    for i, lk in enumerate(links):   # only claims alike in who may see them are compared
+        p = lk["props"]
+        by_end[(lk["type"], lk["a"], lk["b"], json.dumps(lk.get("acl"), sort_keys=True),
+                json.dumps(lk.get("scope_override", p.get("scope_override")), sort_keys=True))].append(i)
+    vals = [_claim_values(lk) for lk in links]
+    when = lambda i: (links[i]["props"].get("valid_from"), links[i]["props"].get("valid_to"))
+    into, report, examples = {}, collections.Counter(), []
+
+    def fuller(i, pool):
+        """The one link of `pool` that is the fuller form of link i (None: none, or several: ambiguous)."""
+        sup = [j for j in pool if j != i and j not in into and _within(vals[i], vals[j])]
+        top = [j for j in sup if not any(k != j and _within(vals[j], vals[k]) and vals[k] != vals[j] for k in sup)]
+        if len({json.dumps(vals[j], sort_keys=True) for j in top}) > 1:
+            return "ambiguous"
+        return min(top, key=lambda j: links[j]["props"]["claim_id"]) if top else None
+
+    for group in by_end.values():
+        if len(group) < 2:
+            continue
+        spans = collections.defaultdict(list)
+        for i in group:
+            spans[when(i)].append(i)
+        for span, pool in spans.items():   # 1. one interval: the claim that states less goes into the fuller one
+            for i in sorted(pool, key=lambda i: (len(vals[i]), links[i]["props"]["claim_id"])):
+                j = fuller(i, pool)
+                if j == "ambiguous":
+                    report["not merged: several fuller claims of one interval could each be it"] += 1
+                elif j is not None:
+                    into[i] = j
+                    report["merged: the same claim and interval, one stating less"] += 1
+            left = [i for i in pool if i not in into]
+            for x in range(len(left)):
+                for y in range(x + 1, len(left)):
+                    report["not merged: one interval, values that disagree (conflicting claims)"] += 1
+                    if len(examples) < 20:
+                        examples.append({"type": links[left[x]]["type"], "a": links[left[x]]["a"], "b": links[left[x]]["b"],
+                                         "valid_from": span[0], "valid_to": span[1],
+                                         "values": [{k: json.loads(v) for k, v in vals[k_].items() if k not in CLAIM_DEFAULTS
+                                                     or json.loads(v) != CLAIM_DEFAULTS[k]} for k_ in (left[x], left[y])]})
+        dated = [i for i in group if when(i) != (None, None) and i not in into]
+        for i in spans.get((None, None), []):   # 2. an undated claim the one dated claim states in full
+            if i in into or not dated:
+                continue
+            fits = [j for j in dated if _within(vals[i], vals[j])]
+            seen = links[i]["props"].get("observed_at")
+            if len(fits) == 1 and (links[fits[0]]["props"].get("valid_to") or
+                                   (seen and (links[fits[0]]["props"].get("valid_from") or "") > seen)):
+                report["not merged: an undated claim whose one dated form is not open when it was seen"] += 1
+            elif len(fits) == 1:
+                into[i] = fits[0]
+                report["merged: an undated claim into the one open dated claim that states it"] += 1
+            elif len(fits) > 1:
+                report["not merged: an undated claim several dated claims state (which one is not known)"] += 1
+            else:
+                report["not merged: an undated claim that states what no dated claim of it does"] += 1
+
+    def root(i):
+        while i in into:
+            i = into[i]
+        return i
+    kept = {}
+    for i, lk in enumerate(links):
+        r = root(i)
+        if r == i:
+            kept.setdefault(i, lk)
+            continue
+        base = kept.get(r)
+        if base is None or base is links[r]:
+            base = kept[r] = {**links[r], "props": dict(links[r]["props"])}
+        p, q = base["props"], lk["props"]
+        p["evidence"] = sorted(set(p.get("evidence") or []) | set(q.get("evidence") or []))
+        if (p.get("method"), p.get("at_source")) == (q.get("method"), q.get("at_source")):
+            # a repeat of the same way of reading: more sightings, the surer one counts (store.put_link)
+            p["support_count"] = (p.get("support_count") or 1) + (q.get("support_count") or 1)
+            if q.get("confidence") is not None:
+                p["confidence"] = max(p.get("confidence") or 0, q["confidence"])
+        else:
+            report["merged across methods: evidence united, the kept claim's method, confidence and sightings unchanged"] += 1
+        if q.get("_stated"):
+            p["_stated"] = {**q["_stated"], **(p.get("_stated") or {})}
+    absorbed = {links[i]["props"]["claim_id"]: links[root(i)]["props"]["claim_id"] for i in into}
+    out = []
+    for i in sorted(kept):
+        lk = kept[i]
+        if lk["props"].get("bound_link") in absorbed:
+            lk = {**lk, "props": {**lk["props"], "bound_link": absorbed[lk["props"]["bound_link"]]}}
+        out.append(lk)
+    return out, absorbed, {"counts": dict(sorted(report.items())), "conflicting_examples": examples}
+
+
 def J(path):
     return json.loads(Path(path).read_text(encoding="utf-8"))
 

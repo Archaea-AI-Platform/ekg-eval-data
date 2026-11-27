@@ -118,7 +118,7 @@ COLUMNS_ASK = (
     "several (\",\", \";\", \"/\", \"space\"), else \"none\". fields: the columns that hold a value OF THAT LINK (a date, "
     "a count, a role, the part of the other record it is about), each with the link's field name as listed. fixed: a "
     "link field with listed values whose value the column's header or the table's heading states for every row, with "
-    "one of those values; else []. period: when a column gives the link's time as a period (a start, an end, or a "
+    "one of those values; or a number field (an order, a rank) whose number the column's header states for every row (a header \"Second most\" states 2); else []. period: when a column gives the link's time as a period (a start, an end, or a "
     "range), that column, and the words its cells put before a start (from_words) and before an end (to_words), "
     "copied from the cells as written; column \"none\" and [] otherwise. Code reads its dates: a range is a start and an "
     "end, one date after an end word is the end, any other one date the start. A column may have several entries, "
@@ -190,10 +190,16 @@ def signature(doc_rec, tb):
 
 class MappingCache:
     """Accepted mappings by table signature, in <out>/table_mappings.json: a rebuild reuses a table's mapping (held to
-    the registry again by check) and asks the model only for a table that is new or changed."""
+    the registry again by check) and asks the model only for a table that is new or changed. A mapping that left
+    something unread for want of schema (a schema_gap) or that was rejected is kept only under the registry it was
+    made with (its spec sha256): once the schema changes, that table is asked again, since the new schema may hold
+    what the old one could not. The earlier mapping is kept aside (`earlier`): settle uses the new one only when it
+    reads all the earlier one read (a new answer is never a step back). A fully read mapping stays (check holds it to
+    the new registry)."""
 
-    def __init__(self, path):
-        self.path, self.rows, self.hits = path, {}, 0
+    def __init__(self, path, registry_sha=""):
+        self.path, self.rows, self.hits, self.registry_sha, self.stale = path, {}, 0, registry_sha, 0
+        self.earlier, self.kept_earlier = {}, 0
         try:
             self.rows = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
         except (OSError, json.JSONDecodeError):
@@ -201,10 +207,17 @@ class MappingCache:
 
     def get(self, t):
         row = self.rows.get(t.write.get("signature"))
-        return row["answer"] if row else None
+        if not row:
+            return None
+        ans = row["answer"]
+        if row.get("registry") != self.registry_sha and ((ans.get("schema_gap") or "").strip() or ans.get(VERDICT) == "rejected"):
+            self.stale += 1
+            self.earlier[t.write.get("signature")] = ans
+            return None
+        return ans
 
     def put(self, t, answer, model=""):
-        self.rows[t.write["signature"]] = {"table": t.question, "model": model,
+        self.rows[t.write["signature"]] = {"table": t.question, "model": model, "registry": self.registry_sha,
                                            "answer": {k: v for k, v in answer.items() if k != "_usage"}}
         self.path.write_text(json.dumps(self.rows, indent=1, ensure_ascii=False), encoding="utf-8")
 
@@ -543,12 +556,17 @@ def check(t: Task, ans, catalog, lenient_split=False):
                 dropped[f"mapping: link field {f['field']} mapped twice"] += 1
             else:
                 own.append([fc, f["field"]])
-        fixed = {}   # a link field the header states for every row: one of the field's listed values only
+        fixed = {}   # a link field the header states for every row: one of the field's listed values, or a number
+        known = reg.link(ltype).known_values
         for f in x.get("fixed") or []:
             spec = offered_own.get(f.get("field")) if isinstance(f, dict) else None
-            got = coerce(spec, f.get("value")) if spec is not None and spec.enum else None
+            got = fixed_value(spec, known.get(f.get("field")) or (), f.get("value")) if spec is not None else None
             if got is None:
-                dropped["mapping: a fixed value that is not one of the link field's listed values"] += 1
+                if spec is not None and str(f.get("value") or "").strip():   # a value the header was meant to give: ask again
+                    return {"status": "rejected", "dropped": dict(dropped),
+                            "reason": f"check: the fixed value {str(f.get('value'))[:30]!r} of {f['field']} on {x['link']} "
+                                      f"(column {x.get('column')}) is neither one of the field's listed values nor a number"}
+                dropped["mapping: a fixed value that is not one of the link field's listed values, nor a number"] += 1
             elif f["field"] in fixed or any(f["field"] == g for _, g in own):
                 dropped[f"mapping: link field {f['field']} mapped twice"] += 1
             else:
@@ -584,6 +602,30 @@ def check(t: Task, ans, catalog, lenient_split=False):
                           **({"cells_that_do_not_split": unsplit[:10]} if unsplit else {})}
     return {"status": "accepted", "mapping": m, "reason": (ans.get("reason") or "")[:300], "dropped": dict(dropped),
             **({"schema_gap": gap[:300]} if gap else {})}
+
+
+def reads(m):
+    """What a checked mapping reads of its table: each column's field, each link column with its link, the link
+    values it takes from columns, the ones its header fixes, and its period column."""
+    out = {("name", m.get("name")), ("key", m.get("key"), m.get("key_field"))} if m.get("shape") == "rows" else {("entity", m.get("entity"))}
+    out |= {("field", str(c), f) for c, f in m.get("fields") or []}
+    for l in m.get("links") or []:
+        col = str(l.get("column") if "column" in l else l.get("label"))
+        out.add(("link", col, l.get("link")))
+        out |= {("link_value", col, l.get("link"), f) for _, f in l.get("fields") or []}
+        out |= {("fixed", col, l.get("link"), f) for f in (l.get("fixed") or {})}
+        if l.get("period"):
+            out.add(("period", col, l.get("link")))
+    return out
+
+
+def fixed_value(spec, known, value):
+    """A `fixed` link value, held to the registry: one of the field's enumeration or of the link's named values for
+    it (`known`), as listed; or a number for a number field. (value, precision) or None."""
+    if spec.enum or spec.type == "number":
+        return coerce(spec, value)
+    hit = next((k for k in known if k.lower() == str(value or "").strip().lower().replace(" ", "_")), None)
+    return (hit, None) if hit else None
 
 
 PERIOD_FIELDS = ("valid_from", "valid_to")   # the registry's interval fields a period column fills
@@ -806,8 +848,13 @@ async def settle(t: Task, ask, catalog):
         # without them: the split for the rows it parses (the rest counted, the table read as text too), the rest of
         # the mapping without that column (left unread, so read as text too)
         for got, reason in failed:
-            got, kept = _without_shared_identity(got, reason), {}
+            got, kept = _without_bad_fixed(_without_shared_identity(got, reason), reason), {}
             again = check(t, got, catalog)
+            for _ in range(len(got.get("links") or [])):   # each other unreadable fixed value, one at a time
+                if again["status"] != "rejected" or "fixed value" not in again["reason"]:
+                    break
+                got = _without_bad_fixed(got, again["reason"])
+                again = check(t, got, catalog)
             if again["status"] == "rejected" and "does not parse the sample row cell" in again["reason"]:
                 again, kept = check(t, got, catalog, lenient_split=True), {LENIENT: True}
             if again["status"] == "accepted":
@@ -826,6 +873,14 @@ async def settle(t: Task, ask, catalog):
             if got["status"] == "accepted":
                 e, ans = {**got, "retried_after": retried,
                           "row_type_from_columns": f"{ans.get('row_type')} -> {fixed['row_type']} named by {fixed['name_column']}"}, again
+    prev = MAPPINGS.earlier.get(t.write.get("signature")) if MAPPINGS is not None else None
+    if prev is not None and not prev.get(VERDICT):
+        before = check(t, prev, catalog, lenient_split=bool(prev.get(LENIENT)))
+        if before["status"] == "accepted" and not (e["status"] == "accepted" and reads(before["mapping"]) <= reads(e["mapping"])):
+            # asked again for a new schema, and the new answer reads less than the earlier one did: the earlier stays
+            MAPPINGS.kept_earlier += 1
+            e, ans = {**before, "mapping_from": "cache: the earlier mapping, kept: the one asked for the new schema reads "
+                                                "less of the table", "asked_again": e.get("reason", "")[:200]}, prev
     if usage:
         e["usage"] = usage
     e["steps"] = info
@@ -861,6 +916,19 @@ def _row_from_columns(shape, catalog):
     return {**shape, "shape": "rows", "row_type": pick[1], "name_column": pick[0], "key_column": "none",
             "statement_column": "none", "columns": [x for x in shape.get("columns") or [] if isinstance(x, dict)
                                                     and x.get("column") != pick[0]]}
+
+
+def _without_bad_fixed(ans, reason):
+    """The answer without the fixed value check refused in `reason` (the link column keeps its other values), else
+    unchanged."""
+    m = re.search(r"fixed value .* of (\w+) on (\w+) \(column (c\d+(?:\.\d+)?)\)", reason or "")
+    if not m:
+        return ans
+    field, link, column = m.groups()
+    links = [{**x, "fixed": [f for f in x.get("fixed") or [] if not (isinstance(f, dict) and f.get("field") == field)]}
+             if isinstance(x, dict) and x.get("column") == column and x.get("link") == link else x
+             for x in ans.get("links") or []]
+    return {**ans, "links": links}
 
 
 def _without_shared_identity(ans, reason):
@@ -1131,7 +1199,13 @@ def apply(w, t: Task, e):
     def obtain(ty, key, name, props, unit, what, key_field=None, create=False, same_kind=False, never_create=False):
         """The one record a cell names: found in the graph (by its key field when the mapping gives one, so a tool's
         own record is found by its number or sha), made earlier in this table, or created; never created when
-        `never_create` (a bare first name: THIN is returned instead). (rec, why)."""
+        `never_create` (a bare first name: THIN is returned instead). (rec, why).
+        A record with a path in its repository (a File) is found and made by its path read with its leading "/" as
+        the root (repo_path): "/src/a.py" in one table and "src/a.py" in another are one file, one record."""
+        if extract_schema.has_path(reg, ty):
+            nfield = cat.name_field(ty)
+            key, name = extract_schema.repo_path(key), extract_schema.repo_path(name)
+            props = {f: extract_schema.repo_path(x) if f in (extract_schema.PATH_FIELD, nfield) else x for f, x in props.items()}
         found = v.by_field(ty, key_field, props.get(key_field, key)) if key_field else []
         if not found:
             found = None
@@ -1148,6 +1222,9 @@ def apply(w, t: Task, e):
                 found = v.by_name_prefix(name, {ty})
             if not found and not extract_facts.is_name(ty) and not same_kind:   # known as the other kind of record (a person's account)
                 found = v.resolve(key, fam.get(ty, {ty}) - {ty}, tool)
+        if any(w.tool_access_record(r) for r in found):   # a tool's own place is never what a table row names
+            found = [r for r in found if not w.tool_access_record(r)]
+            c[f"{ty}: a tool's own place of that name left alone (a table describes its own scope)"] += 1
         if len(found) > 1:
             return None, f"{what}: {len(found)} records match, not linked"
         if found:
@@ -1220,9 +1297,20 @@ def apply(w, t: Task, e):
         out = []
         ty, key_field = l["other"], l.get("other_key")
         onf = cat.name_field(ty)
+        # the other type's one number key (a pull request's number), for a column the mapping gave no key field: a
+        # cell written in that key's form ("#246", "246") names the existing record of that number. It only finds:
+        # with no such record the cell is read as before (by name), and a person's name column is never read so
+        numbered = [f for f, s in cat.key_fields(ty).items() if s.type == "number" and f != onf] \
+            if not key_field and onf != PERSONAL_NAME else []
         for val in values(raw, l["split"]):
             if placeholder(val):
                 c["placeholder cell (-, n/a ...): no link end, left out"] += 1
+                continue
+            num = _NUMBER_KEY.fullmatch(val.strip()) if len(numbered) == 1 else None
+            hits = v.by_field(ty, numbered[0], int(num.group(1))) if num else []
+            if len(hits) == 1:
+                c[f"{ty}: a link cell written as its {numbered[0]}, the existing record of that {numbered[0]}"] += 1
+                out.append(hits[0])
                 continue
             props = {onf: val.lstrip("@")} if onf else {}
             if key_field:
@@ -1303,6 +1391,11 @@ def apply(w, t: Task, e):
     parts, key_field = m.get("parts") or [], m.get("key_field")
     heads = list(tb.header) + [f"{tb.header[p[0]]} (part {k + 1})" for p in parts for k in range(p[1])]
     unread = unread_columns(m, len(tb.header))
+    # the other fields a record is named or looked up by (a preferred name, a display name, a handle): the row's name
+    # column already gives its name, and the same cell copied into one of these would state a second name the table
+    # does not give. A field of another kind from that cell (a file's path, which its name is) is still written
+    # (the fields the name index reads: fill_tasks.View.add_name)
+    also_names = {f for f in (*extract_schema.names_of(reg.record(rtype)), *LOOKUP_FIELDS) if f != nf}
     # pass 1: every row's own record, so that a later column can name a row further down (a manager)
     rows = []
     for unit, cells in tb.rows():
@@ -1327,6 +1420,10 @@ def apply(w, t: Task, e):
                 c["row skipped: its key does not fit the key field's type"] += 1
                 continue
         for i, f in m["fields"]:
+            if i == m["name"] and nf and f in also_names:   # one cell, one value: the name is not a second name too
+                if cell(cells, i):
+                    c[f"cell skipped: {f} is the row's name column (its name), not a name of its own"] += 1
+                continue
             put(props, f, cell(cells, i))
         if not key:
             if not (tf and props.get(tf)):
@@ -1377,7 +1474,7 @@ def apply(w, t: Task, e):
                 own = [(f, cell(cells, i)) for i, f in l.get("fields", [])]
                 if l.get("period"):   # the link's interval, from the period column (extract_schema.period)
                     pr = l["period"]
-                    for f, day in zip(PERIOD_FIELDS, period(cell(cells, pr["column"]), pr["from_words"], pr["to_words"], year)):
+                    for f, day in zip(PERIOD_FIELDS, period(cell(cells, pr["column"]), pr["from_words"], pr["to_words"], year, c)):
                         if day:
                             own.append((f, day))
                 if l.get("near") is None:
@@ -1401,6 +1498,7 @@ def apply(w, t: Task, e):
     return None
 
 
+_NUMBER_KEY = re.compile(r"#?(\d+)")   # a cell written as a number key: "#246", "246"
 THIN = "a bare first name"   # obtain()'s answer for a name it may not create a record from
 
 
@@ -1409,9 +1507,12 @@ def resolve_thin(w):
     written. Within one tenant, a single word that is the first word of exactly ONE record's personal name, and no
     other record's name, login or alias of that identity, is that record when the link's other end (the row's
     record, or the near end) is already linked to it or to its accounts: the table corroborates what the graph
-    holds. Any other bare name is left unlinked and counted; it never becomes a record of its own."""
+    holds. A table names one person one way: a bare name the same table settled so in another row (that row's
+    record was linked to its one candidate) is that record in its other rows too. Any other bare name is left
+    unlinked and counted; it never becomes a record of its own."""
     v, c, reg = w.v, w.facts, common._reg
     pending, w.thin_pending = getattr(w, "thin_pending", []), []
+    settled, waiting = collections.defaultdict(set), []   # (table, name) -> the records rows of that table settled it to
     for l, near, val, unit, own, link in pending:
         ty = l["other"]
         fam = {ty} | extract_facts.family(reg, ty, v._identity)
@@ -1422,11 +1523,18 @@ def resolve_thin(w):
               "not linked (not created)"] += 1
             continue
         if not v.linked(near, cands[0]):
-            c[f"{ty}: a bare first name, one record could be it but nothing links it to the row's record yet: not linked "
-              "(not created)"] += 1
+            waiting.append((l, near, val, unit, own, link, cands[0]))
             continue
+        settled[(id(link), name_key(val))].add(cands[0]["id"])
         c[f"{ty}: a bare first name, the one record whose name starts with it, already linked to the row's record"] += 1
         link(l, near, None, unit, own, [cands[0]])
+    for l, near, val, unit, own, link, cand in waiting:   # `link` is one table's: the same table, another row
+        if settled.get((id(link), name_key(val))) == {cand["id"]}:
+            c[f"{l['other']}: a bare first name the same table settled in another row: that record"] += 1
+            link(l, near, None, unit, own, [cand])
+        else:
+            c[f"{l['other']}: a bare first name, one record could be it but nothing links it to the row's record yet: "
+              "not linked (not created)"] += 1
 
 
 def _apply_key_value(w, t, m, tb, cat, c, obtain, mention, put, link, nf):

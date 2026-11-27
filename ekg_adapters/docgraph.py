@@ -6,8 +6,9 @@ emit() for each ContentVersion they make, so a document has the same shape whate
     owner (File | Document)
       <- VERSION_OF - ContentVersion            (made by the caller; its text is DocText.text)
       <- SECTION_OF | PART_OF - DocSection      one per heading, page, slide, sheet or tab; nested by SECTION_OF
-      Piece - PART_OF -> DocSection | owner     the text, cut at block boundaries; `order` is document-global
-      Piece - OF_VERSION -> ContentVersion      and `span` is "start-end" in the version's text
+      Piece - PART_OF -> DocSection | owner     the text, cut at block boundaries; `order` is document-global,
+      Piece - OF_VERSION -> ContentVersion      `span` is "start-end" in the version's text, `pages` "3" or "3-4"
+                                                for a paged source (a PDF: its text flows across pages)
       Piece - NEXT -> Piece                     reading order
 
 Pieces cover all of the text: the spans of one version's pieces, laid end to end, are the version's
@@ -107,7 +108,8 @@ def split_pieces(doc: DocText, target: int = PIECE_CHARS):
     """The document's text as pieces: [{start, end, text, kind, section, refs}], in reading order.
 
     Blocks are packed up to `target` characters, never across a section boundary; a table stands alone. A block longer than
-    `target` is cut on its own (a table between rows, code and text between lines)."""
+    `target` is cut on its own (a table between rows, code and text between lines). A piece of a paged source whose
+    blocks say their page (a PDF's: meta page / page_end) has `pages` (first, last); else None."""
     sections, of_block = outline(doc)
     groups, cur = [], None     # a group: {"section", "blocks": [...]} or {"section", "block", "part": (s, e), "first"}
     for i, b in enumerate(doc.blocks):
@@ -152,7 +154,10 @@ def split_pieces(doc: DocText, target: int = PIECE_CHARS):
             kinds = {b.kind for b in grp["blocks"] if b.kind not in ("heading", "container")}
             refs = [r for b in grp["blocks"] for r in b.refs]
         kind = "table" if kinds == {"table"} else "code" if kinds == {"code"} else "list" if kinds == {"list_item"} else "text"
-        pieces.append({"start": start, "end": end, "text": body, "kind": kind, "section": grp["section"], "refs": refs})
+        held = [grp["block"]] if "part" in grp else grp["blocks"]
+        on = [n for b in held for n in (b.meta.get("page"), b.meta.get("page_end")) if isinstance(n, int)]
+        pieces.append({"start": start, "end": end, "text": body, "kind": kind, "section": grp["section"], "refs": refs,
+                       "pages": (min(on), max(on)) if on else None})
     return sections, pieces
 
 
@@ -235,7 +240,8 @@ def emit(g: Graph, owner, doc: DocText, version, scope, tool, native_prefix, at=
         sec = sec_recs[pc["section"]] if pc["section"] is not None else None
         piece = g.rec("Piece", tool, f"{native_prefix}:{order}", {
             "text": pc["text"], "kind": pc["kind"], "heading": sections[pc["section"]]["path"] if sec else None,
-            "order": order, "span": f"{pc['start']}-{pc['end']}", "created_at": at}, scope, acl_from=owner)
+            "order": order, "span": f"{pc['start']}-{pc['end']}", "created_at": at,
+            **({"pages": _pages(pc["pages"])} if pc.get("pages") else {})}, scope, acl_from=owner)
         part_of = sec if sec is not None and reg.link_allows("PART_OF", "Piece", "DocSection") else owner
         g.link("PART_OF", piece, part_of, "field", order=order)
         g.link("OF_VERSION", piece, version, "field")
@@ -253,6 +259,11 @@ def emit(g: Graph, owner, doc: DocText, version, scope, tool, native_prefix, at=
     if current:
         _claims(g, owner, doc, version, scope, tool, native_prefix, at)
     return {"sections": sec_recs, "pieces": recs}
+
+
+def _pages(span):
+    """(first, last) page -> "3" or "3-4"."""
+    return str(span[0]) if span[0] == span[1] else f"{span[0]}-{span[1]}"
 
 
 def _close(link, at):

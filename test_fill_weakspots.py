@@ -226,12 +226,14 @@ def table_checks(check):
           not any(";" in str(p) for p in persons)
           and c.get("Person: a cell that holds more than a name (\"Jonathan; Ben for infrastructu\"), not created and not linked") == 1)
     check("people: 'Noah 26' on OPS-FULF is Noah Patel (OPS-FULF is already OWNED_BY him), 'Maya 29' on OPS-PACK is "
-          "Maya Chen; 'Maya 11' on OPS-FULF and 'Priya 8' on OPS-PACK have no corroborating link: not linked, counted",
-          {("Noah Patel", "OPS-FULF"), ("Maya Chen", "OPS-PACK")} <= know
-          and ("Maya Chen", "OPS-FULF") not in know and ("Priya Nair", "OPS-PACK") not in know
+          "Maya Chen; 'Maya 11' on OPS-FULF is Maya Chen too (the same table settled 'Maya' in another row); 'Priya 8' "
+          "on OPS-PACK has no corroborating link in the graph or the table: not linked, counted",
+          {("Noah Patel", "OPS-FULF"), ("Maya Chen", "OPS-PACK"), ("Maya Chen", "OPS-FULF")} <= know
+          and ("Priya Nair", "OPS-PACK") not in know
           and c.get("Person: a bare first name, the one record whose name starts with it, already linked to the row's record") == 2
+          and c.get("Person: a bare first name the same table settled in another row: that record") == 1
           and c.get("Person: a bare first name, one record could be it but nothing links it to the row's record yet: not "
-                    "linked (not created)") == 2)
+                    "linked (not created)") == 1)
     mentions = {(a, b) for a, b, _ in L["MENTIONS"]}
     check("people: the commit-count piece MENTIONS the module and the people it names (a record result can point to it)",
           any(b == "Noah Patel" for _, b in mentions) and any(b == "OPS-FULF" for _, b in mentions))
@@ -250,8 +252,9 @@ def table_checks(check):
     auth = sorted(set(owned["PAY-AUTH"]))
     current = {b for b, f, t in auth if not t}
     check("stewardship: PAY-AUTH's history gives Lionel an end (Before Oct 03 -> valid_to 2026-10-03), Mahesh a range "
-          "(Oct 03-07), Suzan a start (From Oct 08), the year taken from the document's own dates; one current owner",
-          ("Lionel", "", "2026-10-03") in auth and ("Mahesh", "2026-10-03", "2026-10-07") in auth
+          "(Oct 03-07, the 7th included: valid_to 2026-10-08), Suzan a start (From Oct 08), the year taken from the document's "
+          "own dates; one current owner",
+          ("Lionel", "", "2026-10-03") in auth and ("Mahesh", "2026-10-03", "2026-10-08") in auth
           and ("Suzan", "2026-10-08", "") in auth and current == {"Suzan"})
     check("stewardship: no OWNED_BY without a date", all(f or t for xs in owned.values() for _, f, t in xs))
     appr = {(a, b, p.get("aspect"), p.get("kind")) for a, b, p in L["APPROVER_FOR"]}
@@ -303,10 +306,33 @@ def date_checks(check):
     check("dates: coerce reads a whole month-name date as a day; a period or a sentence is no date",
           extract_schema.coerce(spec, "Oct 08, 2026") == ("2026-10-08T00:00:00Z", "day")
           and extract_schema.coerce(spec, "Before Oct 03", "2026") is None and extract_schema.coerce(spec, "Oct 03", "2026")[0] == "2026-10-03T00:00:00Z")
-    check("dates: periods by the table's own words: a range, an end word, a start word, a bare date (a start)",
-          p("Oct 03-07", [], [], "2026") == ("2026-10-03", "2026-10-07") and p("Before Oct 03", ["From"], ["Before"], "2026") == (None, "2026-10-03")
+    check("dates: periods by the table's own words: a range (its last day included, so valid_to is the day after), an "
+          "end word, a start word, a bare date (a start)",
+          p("Oct 03-07", [], [], "2026") == ("2026-10-03", "2026-10-08") and p("Before Oct 03", ["From"], ["Before"], "2026") == (None, "2026-10-03")
           and p("From Oct 08", ["From"], ["Before"], "2026") == ("2026-10-08", None) and p("2026-01-01") == ("2026-01-01", None)
           and p("Before Oct 03", [], [], None) == (None, None))
+    check("dates: a range's end is exclusive in the store: the day after its written last day, across a month or a year "
+          "end, however the two days are written",
+          p("Oct 03 - Oct 07, 2026", [], [], "2026") == ("2026-10-03", "2026-10-08") and p("2026-10-03 to 2026-10-07") == ("2026-10-03", "2026-10-08")
+          and p("Feb 27-28", [], [], "2026") == ("2026-02-27", "2026-03-01") and p("Dec 30-31", [], [], "2026") == ("2026-12-30", "2027-01-01"))
+    check("dates: a range written with clock times is not moved (its end is that time, not a whole day); one end date "
+          "after an end word stays the first day outside the period",
+          p("2026-10-03 09:00 to 2026-10-07 17:00") == ("2026-10-03", "2026-10-07")
+          and p("2026-10-03T09:00:00Z - 2026-10-07T17:30:00Z") == ("2026-10-03", "2026-10-07")
+          and p("Before Oct 07", ["From"], ["Before"], "2026") == (None, "2026-10-07")
+          and p("Oct 03 - Oct 07, 2026 5pm", [], [], "2026") == ("2026-10-03", "2026-10-07")
+          and p("2026-10-03 - 2026-10-07 17h30") == ("2026-10-03", "2026-10-07")
+          and p("2026-10-03 - 2026-10-07 17:00+02:00") == ("2026-10-03", "2026-10-07")
+          and p("Oct 03-07 17:00", [], [], "2026") == ("2026-10-03", "2026-10-07"))
+    check("dates: the parser says which day carries a time of day; a number after a date that is no time (a count, "
+          "a version) leaves it a whole day",
+          [x[3] for x in extract_schema.dates_in("2026-10-03 to 2026-10-07T17:00:00Z")] == [False, True]
+          and p("2026-10-03 to 2026-10-07 42 items") == ("2026-10-03", "2026-10-08")
+          and p("2026-10-03 to 2026-10-07 v1.2") == ("2026-10-03", "2026-10-08"))
+    seen = collections.Counter()
+    check("dates: a range whose last day is the calendar's last keeps it as written (no day after it) and is counted, "
+          "never stopping the build",
+          p("9999-12-30 to 9999-12-31", counter=seen) == ("9999-12-30", "9999-12-31") and sum(seen.values()) == 1)
     check("dates: the year of a table or document is the latest full year it writes", extract_schema.year_of(["x 2025-01-02", "2026-10-08"]) == "2026")
 
 
